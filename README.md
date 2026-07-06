@@ -43,7 +43,7 @@
 | **Time zero** | ICU intime | **First crystalloid** (исправлено!) |
 | **Treatment window** | Не указано | [time_zero, time_zero + 24h] |
 | **Late albumin** | Не указано | Исключен из когорты |
-| **Propensity model** | Не указана | **LogReg baseline** + GradientBoosting |
+| **Propensity model** | Не указана | **LogReg + GradientBoosting + LightGBM** |
 | **Overlap check** | Не указан | Порог [0.1, 0.9] |
 | **IPW weights** | Не указано | Stabilized + clipping (>10) |
 
@@ -79,7 +79,8 @@ pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels jobl
    - **Выход:** `cohort_sepsis.csv` + cohort counts
 
 2. **02_propensity_matching.py** - Propensity score анализ
-   - **Propensity model: LogReg baseline** + GradientBoosting
+   - **Три модели на выбор:** LogReg + GradientBoosting + LightGBM
+   - Сравнение AUC-ROC, выбор модели (не гонимся за сложностью)
    - Overlap check: порог [0.1, 0.9]
    - Calibration plot
    - Matching 1:1 nearest neighbor (without replacement)

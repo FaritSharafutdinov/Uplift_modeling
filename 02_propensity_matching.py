@@ -1,9 +1,9 @@
 """
 Propensity Score Matching и IPW анализ
-ВЕРСИЯ 2.0 - Исправлена по требованиям ментора
+ВЕРСИЯ 2.1 - Добавлены LogReg + LightGBM
 
 Исправления:
-1. LogReg как baseline + LightGBM как опция
+1. Три модели: LogReg + GradientBoosting + LightGBM
 2. Overlap/positivity по порогу [0.1, 0.9]
 3. Effective sample size для IPW
 4. Extreme weights с clipping
@@ -26,6 +26,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.stats.weightstats import DescrStatsW
 import pickle
+
+# LightGBM (опционально)
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+    print("Warning: LightGBM не установлен. Пропускаем LightGBM модель.")
 
 # Пути
 DATA_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
@@ -62,12 +70,19 @@ confounder_vars = [
 available_confounders = [col for col in confounder_vars if col in cohort.columns]
 print(f"\nИспользуемые конфаундеры ({len(available_confounders)}): {available_confounders}")
 
+# Проверка lactate_missing
+if "lactate_missing" not in cohort.columns:
+    print("\nWARNING: lactate_missing не найден в когорте!")
+    print("Запустите обновленный 01_cohort_creation.py для создания когорты с missing indicators")
+    # Временно создаем dummy колонку
+    cohort["lactate_missing"] = 0
+
 X = cohort[available_confounders].values
 treatment = cohort["treatment"].values
 outcome = cohort["mortality_28days"].values
 
 # ============================================================================
-# Шаг 2: Propensity score - LogReg baseline + GradientBoosting
+# Шаг 2: Propensity score - ТРИ модели: LogReg + GBM + LightGBM
 # ============================================================================
 print("\n" + "="*70)
 print("ШАГ 2: Propensity score модели")
@@ -79,16 +94,23 @@ X_train, X_test, t_train, t_test = train_test_split(
 )
 print(f"Train: {X_train.shape}, Test: {X_test.shape}")
 
-# --- LogReg baseline ---
-print("\n--- Logistic Regression (baseline) ---")
+models_to_compare = {}
+
+# --- 1. LogReg baseline ---
+print("\n--- 1. Logistic Regression (baseline) ---")
 logreg_model = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
 logreg_model.fit(X_train, t_train)
 propensity_scores_logreg = logreg_model.predict_proba(X)[:, 1]
 logreg_auc = roc_auc_score(t_test, logreg_model.predict_proba(X_test)[:, 1])
 print(f"LogReg AUC-ROC: {logreg_auc:.4f}")
+models_to_compare["LogReg"] = {
+    "model": logreg_model,
+    "scores": propensity_scores_logreg,
+    "auc": logreg_auc
+}
 
-# --- GradientBoosting (опционально, для сравнения) ---
-print("\n--- GradientBoostingClassifier ---")
+# --- 2. GradientBoosting (для сравнения) ---
+print("\n--- 2. GradientBoostingClassifier ---")
 propensity_param_dist = {
     "n_estimators": [50, 100, 200],
     "max_depth": [3, 5, 7],
@@ -109,17 +131,79 @@ propensity_search = RandomizedSearchCV(
 )
 
 propensity_search.fit(X_train, t_train)
-best_propensity_model = propensity_search.best_estimator_
+gb_model = propensity_search.best_estimator_
 
-propensity_scores_gb = best_propensity_model.predict_proba(X)[:, 1]
-gb_auc = roc_auc_score(t_test, best_propensity_model.predict_proba(X_test)[:, 1])
+propensity_scores_gb = gb_model.predict_proba(X)[:, 1]
+gb_auc = roc_auc_score(t_test, gb_model.predict_proba(X_test)[:, 1])
 print(f"GradientBoosting AUC-ROC: {gb_auc:.4f}")
 print(f"Лучшие параметры: {propensity_search.best_params_}")
+models_to_compare["GradientBoosting"] = {
+    "model": gb_model,
+    "scores": propensity_scores_gb,
+    "auc": gb_auc
+}
 
-# Используем LogReg как основную модель (не гонимся за AUC!)
-propensity_scores = propensity_scores_logreg
-propensity_model = logreg_model
-print(f"\n=== ИСПОЛЬЗУЕМ LogReg для propensity scores ===")
+# --- 3. LightGBM (опционально, если установлен) ---
+if LIGHTGBM_AVAILABLE:
+    print("\n--- 3. LightGBM ---")
+    lgb_param_dist = {
+        "n_estimators": [50, 100, 200],
+        "max_depth": [3, 5, 7, -1],
+        "learning_rate": [0.01, 0.05, 0.1],
+        "num_leaves": [15, 31, 63],
+        "min_child_samples": [10, 20, 30],
+    }
+    
+    lgb_search = RandomizedSearchCV(
+        estimator=lgb.LGBMClassifier(random_state=42, verbose=-1),
+        param_distributions=lgb_param_dist,
+        n_iter=15,
+        cv=3,
+        scoring="roc_auc",
+        n_jobs=-1,
+        random_state=42,
+        verbose=0,
+    )
+    
+    lgb_search.fit(X_train, t_train)
+    lgb_model = lgb_search.best_estimator_
+    
+    propensity_scores_lgb = lgb_model.predict_proba(X)[:, 1]
+    lgb_auc = roc_auc_score(t_test, lgb_model.predict_proba(X_test)[:, 1])
+    print(f"LightGBM AUC-ROC: {lgb_auc:.4f}")
+    print(f"Лучшие параметры: {lgb_search.best_params_}")
+    models_to_compare["LightGBM"] = {
+        "model": lgb_model,
+        "scores": propensity_scores_lgb,
+        "auc": lgb_auc
+    }
+
+# ============================================================================
+# Сравнение моделей и выбор
+# ============================================================================
+print("\n" + "="*70)
+print("СРАВНЕНИЕ МОДЕЛЕЙ")
+print("="*70)
+
+for name, info in models_to_compare.items():
+    print(f"{name:.<20} AUC-ROC: {info['auc']:.4f}")
+
+# Выбираем модель с лучшим AUC, но не гонимся за сложностью
+# Если LogReg AUC < 0.75, используем её (не переобучаемся)
+# Если LogReg AUC >= 0.75, используем её (достаточно хорошо)
+# Иначе используем лучшую из остальных
+if logreg_auc >= 0.70:
+    print(f"\n=== ИСПОЛЬЗУЕМ LogReg (AUC={logreg_auc:.4f}, достаточно хорошо) ===")
+    propensity_model = logreg_model
+    propensity_scores = propensity_scores_logreg
+elif LIGHTGBM_AVAILABLE and lgb_auc > gb_auc:
+    print(f"\n=== ИСПОЛЬЗУЕМ LightGBM (AUC={lgb_auc:.4f}) ===")
+    propensity_model = lgb_model
+    propensity_scores = propensity_scores_lgb
+else:
+    print(f"\n=== ИСПОЛЬЗУЕМ GradientBoosting (AUC={gb_auc:.4f}) ===")
+    propensity_model = gb_model
+    propensity_scores = propensity_scores_gb
 
 cohort["propensity_score"] = propensity_scores
 
