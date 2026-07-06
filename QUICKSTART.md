@@ -1,78 +1,71 @@
-# Быстрый старт
+# Quick Start - запуск пайплайна
 
-## 1. Проверка зависимостей
+## Требования
 
 ```bash
-pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels joblib
+pip install -r requirements.txt
 ```
 
-## 2. Запуск пайплайна
+## Данные
 
-Выполняй ноутбуки последовательно:
+Данные MIMIC-IV v3.1 должны быть расположены по пути:
+```
+/Users/faritsharafutdinov/untitled folder/mimic-iv-3.1/mimiciv_as_parquet/
+```
+
+## Запуск пайплайна
 
 ```bash
-# 1. Создание когорты (5-10 мин)
+# 1. Создание когорты (time_zero = first crystalloid)
 python 01_cohort_creation.py
 
-# 2. Propensity score matching (10-15 мин)
+# 2. Propensity score matching + IPW
 python 02_propensity_matching.py
 
-# 3. AIPW анализ (15-20 мин)
+# 3. AIPW (Doubly Robust)
 python 03_aipw_analysis.py
 
-# 4. CATE анализ (10-15 мин)
+# 4. CATE анализ (подгруппы)
 python 04_cate_analysis.py
 
-# 5. Сводка результатов (1 мин)
+# 5. Сводка результатов
 python 05_summary_results.py
 ```
 
-Или в Jupyter:
-```
-%run 01_cohort_creation.py
-%run 02_propensity_matching.py
-%run 03_aipw_analysis.py
-%run 04_cate_analysis.py
-%run 05_summary_results.py
-```
+## Выходные файлы
 
-## 3. Проверка результатов
+После запуска создаются:
 
-После выполнения проверь файлы:
-- `cohort_sepsis.csv` - финальная когорта
-- `ps_matching_results.pkl` - результаты matching/IPW
+### Данные
+- `cohort_sepsis.csv` - финальная когорта с конфаундерами
+- `ps_matching_results.pkl` - результаты matching + IPW
 - `aipw_results.pkl` - результаты AIPW
 - `cate_results.pkl` - результаты CATE
-- `*.png` - визуализации
 
-## 4. Ожидаемые результаты
+### Визуализации
+- `propensity_distribution.png` - overlap propensity scores
+- `calibration_plot.png` - калибровка propensity model
+- `love_plot.png` - баланс ковариат (SMD)
+- `bootstrap_ipw.png` - bootstrap распределение IPW
+- `bootstrap_aipw.png` - bootstrap распределение AIPW
+- `cate_forest_plot.png` - CATE по подгруппам
+- `cate_septic_shock.png` - CATE для septic shock
+- `cate_age.png` - CATE для возраста
+- `forest_plot_ate.png` - сравнение всех методов
 
-Сравни свои результаты с таблицей:
+## Отчет
 
-| Метод | Ожидается | Твои |
-|-------|-----------|------|
-| AIPW ATE | ~0% (CI включает 0) | ? |
-| CATE Septic Shock | < 0% (benefit) | ? |
-| Propensity AUC | > 0.75 | ? |
+Для генерации cohort counts:
+```bash
+python cohort_counts.py
+```
 
-## 5. Если что-то не так
+## Интерпретация результатов
 
-1. **ATE значительно отличается от 0:**
-   - Проверь определение сепсиса/септического шока
-   - Убедись что лактат импутирован правильно
-   - Проверь баланс ковариат после matching
+См. таблицу в конце вывода `02_propensity_matching.py` и `05_summary_results.py`:
+- Naive difference
+- IPW ATE
+- Matching ATT
+- AIPW ATE
 
-2. **CATE не показывает benefit для septic shock:**
-   - Проверь что septic_shock = сепсис + вазопрессоры + lactate > 2
-   - Увеличь количество итераций в RandomizedSearchCV
-
-3. **Плохой баланс ковариат:**
-   - Уменьши калипер (сейчас 0.2 * std)
-   - Попробуй другое соотношение treated:control (1:1, 1:2)
-
-## 6. Контакты
-
-Если возникли вопросы - смотри:
-- `README.md` - полная документация
-- `AI_AGENT_PROMPT.md` - детальное описание методологии
-- Оригинал: https://github.com/soda-inria/causal_ehr_mimic
+Все оценки приведены с 95% bootstrap CI.

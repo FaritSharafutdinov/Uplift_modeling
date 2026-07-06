@@ -1,6 +1,29 @@
 # Causal Inference Analysis for Albumin in Sepsis (MIMIC-IV v3.1)
 
+**ВЕРСИЯ 2.0** - Исправлено по требованиям ментора
+
 Этот проект воспроизводит causal inference анализ из статьи **Doutreligne et al. "Step-by-step causal analysis of EHRs to ground decision-making"** (PLOS Digital Health, 2025) на данных **MIMIC-IV v3.1**.
+
+---
+
+## PICOT (обновлено)
+
+| Компонент | Определение |
+|-----------|-------------|
+| **P** (Population) | ICU пациенты с sepsis proxy, возраст >= 18, LOS >= 24ч |
+| **I** (Intervention) | Кристаллоиды + альбумин в течение 24ч после time zero |
+| **C** (Control) | Кристаллоиды без альбумина в течение 24ч после time zero |
+| **O** (Outcome) | Смерть в течение 28 дней после time zero |
+| **T** (Time zero) | **Первое введение кристаллоидов** (НЕ ICU intime!) |
+
+### Target Trial Эмуляция
+
+- **Inclusion**: Первый ICU stay, возраст >= 18, LOS >= 24ч, кристаллоиды в первые 24ч
+- **Exclusion**: Альбумин > 24ч после time zero (late albumin)
+- **Treatment assignment**: Наблюдательное (не рандомизированное)
+- **Confounding adjustment**: Propensity score matching, IPW, AIPW
+
+---
 
 ## Оригинальная статья
 
@@ -12,20 +35,25 @@
 
 ## Ключевые отличия от оригинала
 
-| Аспект | Оригинал (авторы) | Эта реализация |
-|--------|-------------------|----------------|
+| Аспект | Оригинал (авторы) | Эта реализация (v2.0) |
+|--------|-------------------|----------------------|
 | **MIMIC-IV версия** | v2.2 | v3.1 |
-| **SAPSII score** | Доступен | Использован Charlson Comorbidity Index |
-| **Лактат** | Из dedicated таблиц | Из vitalsign/first_day_sofa |
-| **Антибиотики** | По ATC кодам | По названиям препаратов |
-| **Импутация** | Не указана | KNNImputer (k=10) |
+| **SAPSII score** | Доступен | Charlson Comorbidity Index |
+| **Лактат** | Из dedicated таблиц | first_day_sofa + labevents + missing indicator |
+| **Time zero** | ICU intime | **First crystalloid** (исправлено!) |
+| **Treatment window** | Не указано | [time_zero, time_zero + 24h] |
+| **Late albumin** | Не указано | Исключен из когорты |
+| **Propensity model** | Не указана | **LogReg baseline** + GradientBoosting |
+| **Overlap check** | Не указан | Порог [0.1, 0.9] |
+| **IPW weights** | Не указано | Stabilized + clipping (>10) |
 
 ## Структура пайплайна
 
 ```
 notebook_new/
-├── 01_cohort_creation.py       # Создание когорты с конфаундерами
-├── 02_propensity_matching.py   # Propensity score matching + IPW
+├── requirements.txt            # Зависимости Python
+├── 01_cohort_creation.py       # Создание когорты (time_zero = crystalloid)
+├── 02_propensity_matching.py   # LogReg PS, Matching, IPW, SMD, ESS
 ├── 03_aipw_analysis.py         # Doubly Robust (AIPW) анализ
 ├── 04_cate_analysis.py         # CATE (heterogeneous effects)
 └── 05_summary_results.py       # Сводка результатов
@@ -42,19 +70,23 @@ pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels jobl
 ### Порядок выполнения
 
 1. **01_cohort_creation.py** - Создание когорты
-   - Фильтрация ICU stays (возраст >= 18, LOS >= 1 день)
-   - Определение сепсиса (SOFA >= 2 + suspicion of infection)
-   - Определение септического шока (сепсис + вазопрессоры + лактат > 2)
-   - Извлечение конфаундеров (демография, витальные, лабораторные, коморбидность)
-   - Импутация пропусков (KNN)
-   - **Выход:** `cohort_sepsis.csv`
+   - **Time zero = first crystalloid** (НЕ ICU intime!)
+   - Фильтрация: возраст >= 18, LOS >= 24ч, кристаллоиды в первые 24ч
+   - Исключение: late albumin (>24ч после time zero)
+   - Определение сепсиса (suspicion + organ dysfunction)
+   - Конфаундеры за 24ч ДО time_zero
+   - Missing indicators для lactate
+   - **Выход:** `cohort_sepsis.csv` + cohort counts
 
 2. **02_propensity_matching.py** - Propensity score анализ
-   - Обучение propensity model (GradientBoosting с RandomizedSearchCV)
-   - Проверка positivity assumption
-   - Matching с калипером (0.2 * std)
-   - IPW (Inverse Propensity Weighting)
-   - Bootstrap доверительные интервалы
+   - **Propensity model: LogReg baseline** + GradientBoosting
+   - Overlap check: порог [0.1, 0.9]
+   - Calibration plot
+   - Matching 1:1 nearest neighbor (without replacement)
+   - **SMD до/после matching и до/после IPW**
+   - IPW: stabilized weights + clipping (>10)
+   - **Effective Sample Size (ESS)**
+   - Bootstrap CI (500 повторов)
    - **Выход:** `ps_matching_results.pkl`
 
 3. **03_aipw_analysis.py** - Doubly Robust анализ
@@ -106,23 +138,18 @@ pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels jobl
 - Charlson Comorbidity Index
 - Lactate (с импутацией)
 
-### Витальные признаки (mean за 24ч до ICU)
-- Heart rate
-- SpO2
-- Mean BP
-- Temperature
-- Respiratory rate
+### Витальные признаки (mean за 24ч ДО time_zero)
+- Heart rate, SpO2, Mean BP, Temperature, Respiratory rate
 
-### Лекарства (флаги до ICU)
-- Carbapenems
-- Aminoglycosides
-- Beta-lactams
-- Glycopeptides
-- Vasopressors
+### Лекарства (флаги за 24ч ДО time_zero)
+- Carbapenems, Aminoglycosides, Beta-lactams, Glycopeptides
+- **has_vasopressors УБРАН** (это часть определения сепсиса!)
 
-### Процедуры (флаги до ICU)
-- RRT (renal replacement therapy)
-- Ventilation
+### Процедуры (за 24ч ДО time_zero)
+- RRT (renal replacement therapy), Ventilation
+
+### Missing indicators
+- `lactate_missing` (для >50% пропусков)
 
 ## Критерии успеха
 
@@ -130,8 +157,28 @@ pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels jobl
 
 1. ✅ ATE оценки (AIPW, IPW, Matching) имеют CI включающий 0
 2. ✅ CATE для septic shock < 0 (показывает benefit)
-3. ✅ Propensity model AUC-ROC > 0.75
-4. ✅ <10% ковариат имеют |SMD| > 0.1 после matching
+3. ✅ Propensity model: LogReg baseline (не гонимся за AUC)
+4. ✅ Overlap: доля вне [0.1, 0.9] < 5%
+5. ✅ <10% ковариат имеют |SMD| > 0.1 после matching/IPW
+
+---
+
+## Ограничения (честно!)
+
+### Не решено на текущий момент:
+
+1. **Immortal time bias** — частично решено правильным time_zero
+2. **Confounding by indication** — residual confounding возможен
+3. **Weak overlap** — проверяется, trimming по [0.1, 0.9]
+4. **Missingness** — KNN импутация + missing indicators
+5. **Late albumin** — исключен из когорты
+6. **SAPS-II недоступен** — заменен на Charlson (v3.1 limitation)
+
+### Отличия от RCT:
+
+- Наблюдательные данные (не рандомизированные)
+- Остаточное смещение возможно даже после PS adjustment
+- Требуется внешняя валидация
 
 ## Визуализации
 
