@@ -72,7 +72,9 @@ confounder_vars = [
     "sofa", "lactate_final", "charlson_comorbidity_index",
     "hr_mean", "spo2_mean", "mbp_mean", "temp_mean", "resp_mean",
     "has_carbapenems", "has_aminoglycosides", "has_beta_lactams", "has_glycopeptides",
-    "has_vasopressors", "rrt_flag", "ventilation_flag",
+    # "has_vasopressors",  # УБРАН - это часть определения сепсиса!
+    "rrt_flag", "ventilation_flag",
+    "lactate_missing",  # Missing indicator
 ]
 
 available_confounders = [col for col in confounder_vars if col in cohort.columns]
