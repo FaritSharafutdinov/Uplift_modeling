@@ -1,17 +1,3 @@
-# %%
-"""
-AIPW (Augmented Inverse Propensity Weighting) / Doubly Robust анализ
-Адаптировано из causal_ehr_mimic авторов под MIMIC-IV v3.1
-
-AIPW объединяет outcome model и propensity model для более робастной оценки.
-Формула:
-ATE = E[ Y * T / e(X) - Y * (1-T) / (1-e(X)) + 
-         mu_1(X) - mu_0(X) ]
-
-где:
-- e(X) = propensity score
-- mu_1(X), mu_0(X) = outcome models для treated и control
-"""
 
 import polars as pl
 import pandas as pd
@@ -29,17 +15,17 @@ from joblib import Parallel, delayed
 import warnings
 warnings.filterwarnings("ignore")
 
-# Пути
+
 DATA_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
 
-# Загружаем когорту
+
 cohort = pd.read_csv(DATA_DIR / "cohort_sepsis.csv")
 print(f"Когорта: {cohort.shape}")
 
-# %% [markdown]
+
 # ## Шаг 1: Подготовка данных
 
-# %%
+
 confounder_vars = [
     "admission_age", "Female", "White", "Black", "Hispanic",
     "emergency_admission", "insurance_Medicare", "insurance_Medicaid",
@@ -58,11 +44,11 @@ X = cohort[available_confounders].values
 treatment = cohort["treatment"].values
 outcome = cohort["mortality_28days"].values
 
-# %% [markdown]
+
 # ## Шаг 2: Propensity model с гиперпараметрами
 
-# %%
-# Propensity model (тот же что в matching)
+
+
 propensity_param_dist = {
     "n_estimators": [50, 100, 200, 300],
     "max_depth": [3, 5, 7, 10],
@@ -86,10 +72,10 @@ propensity_model = propensity_search.best_estimator_
 
 print(f"Propensity AUC-ROC: {roc_auc_score(treatment, propensity_model.predict_proba(X)[:, 1]):.4f}")
 
-# Предсказываем propensity scores
+
 propensity_scores = propensity_model.predict_proba(X)[:, 1]
 
-# Trim экстремальные значения
+
 ps_lower, ps_upper = np.percentile(propensity_scores, [1, 99])
 trim_mask = (propensity_scores >= ps_lower) & (propensity_scores <= ps_upper)
 
@@ -100,11 +86,11 @@ ps_trimmed = propensity_scores[trim_mask]
 
 print(f"После trimming: {X_trimmed.shape[0]} пациентов")
 
-# %% [markdown]
+
 # ## Шаг 3: Outcome models с гиперпараметрами
 
-# %%
-# Outcome model для treated (T=1)
+
+
 outcome_param_dist = {
     "n_estimators": [50, 100, 200, 300],
     "max_depth": [3, 5, 7, 10, 15],
@@ -113,7 +99,7 @@ outcome_param_dist = {
     "min_samples_leaf": [1, 2, 4],
 }
 
-# Обучаем на treated
+
 treated_mask = t_trimmed == 1
 X_treated = X_trimmed[treated_mask]
 y_treated = y_trimmed[treated_mask]
@@ -133,7 +119,7 @@ outcome_model_treated = outcome_model_treated_search.best_estimator_
 
 print(f"Treated outcome model - Best params: {outcome_model_treated_search.best_params_}")
 
-# Обучаем на control
+
 control_mask = t_trimmed == 0
 X_control = X_trimmed[control_mask]
 y_control = y_trimmed[control_mask]
@@ -153,10 +139,10 @@ outcome_model_control = outcome_model_control_search.best_estimator_
 
 print(f"Control outcome model - Best params: {outcome_model_control_search.best_params_}")
 
-# %% [markdown]
+
 # ## Шаг 4: AIPW оценка
 
-# %%
+
 def compute_aipw(X, t, y, propensity_model, outcome_model_treated, outcome_model_control):
     """
     Вычисляет AIPW оценку
@@ -190,7 +176,7 @@ def compute_aipw(X, t, y, propensity_model, outcome_model_treated, outcome_model
     
     return ate, aipw_individual
 
-# Вычисляем AIPW
+
 ate_aipw, aipw_individual = compute_aipw(
     X_trimmed, t_trimmed, y_trimmed,
     propensity_model,
@@ -201,7 +187,7 @@ ate_aipw, aipw_individual = compute_aipw(
 print(f"\n=== AIPW ATE ===")
 print(f"ATE: {ate_aipw:.4f} ({100*ate_aipw:.2f}%)")
 
-# Стандартная ошибка через sample variance
+
 n = len(aipw_individual)
 se_aipw = aipw_individual.std(ddof=1) / np.sqrt(n)
 ci_lower = ate_aipw - 1.96 * se_aipw
@@ -211,10 +197,10 @@ print(f"SE: {se_aipw:.4f}")
 print(f"95% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
 print(f"Значимо: {'Да' if (ci_lower > 0 or ci_upper < 0) else 'Нет'}")
 
-# %% [markdown]
+
 # ## Шаг 5: Bootstrap доверительные интервалы
 
-# %%
+
 def bootstrap_aipw(X, t, y, propensity_model, outcome_t, outcome_c, n_bootstrap=1000, random_state=42):
     """Bootstrap для AIPW"""
     np.random.seed(random_state)
@@ -222,7 +208,7 @@ def bootstrap_aipw(X, t, y, propensity_model, outcome_t, outcome_c, n_bootstrap=
     ate_samples = []
     
     for i in range(n_bootstrap):
-        # Ресемплинг
+        
         idx = np.random.choice(n, size=n, replace=True)
         X_boot = X[idx]
         t_boot = t[idx]
@@ -240,7 +226,7 @@ def bootstrap_aipw(X, t, y, propensity_model, outcome_t, outcome_c, n_bootstrap=
     
     return ate_samples.mean(), ci_lower, ci_upper, ate_samples
 
-# %%
+
 print("Вычисляем bootstrap CI для AIPW...")
 ate_aipw_boot, ci_aipw_lower, ci_aipw_upper, aipw_samples = bootstrap_aipw(
     X_trimmed, t_trimmed, y_trimmed,
@@ -252,8 +238,8 @@ print(f"\nAIPW ATE (bootstrap): {ate_aipw_boot:.4f}")
 print(f"95% CI: [{ci_aipw_lower:.4f}, {ci_aipw_upper:.4f}]")
 print(f"Значимо: {'Да' if (ci_aipw_lower > 0 or ci_aipw_upper < 0) else 'Нет'}")
 
-# %%
-# Визуализация bootstrap распределения
+
+
 plt.figure(figsize=(10, 5))
 plt.hist(aipw_samples, bins=50, alpha=0.7, color="purple", edgecolor="black")
 plt.axvline(x=0, color="red", linestyle="--", linewidth=2, label="Null effect")
@@ -268,20 +254,20 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "bootstrap_aipw.png", dpi=150)
 # plt.show()
 
-# %% [markdown]
+
 # ## Шаг 6: Сравнение всех методов
 
-# %%
+
 import pickle
 
-# Загружаем результаты из matching
+
 try:
     with open(DATA_DIR / "ps_matching_results.pkl", "rb") as f:
         matching_results = pickle.load(f)
 except:
     matching_results = {"ate_ipw": None, "ci_ipw": (None, None), "ate_matching": None, "ci_matching": (None, None)}
 
-# Сравниваем
+
 print("\n=== СРАВНЕНИЕ МЕТОДОВ ===")
 print(f"{'Метод':<20} {'ATE':>10} {'95% CI':>25}")
 print("-" * 60)
@@ -290,10 +276,10 @@ print(f"{'IPW':<20} {matching_results['ate_ipw']:>10.4f} [{matching_results['ci_
 print(f"{'AIPW':<20} {ate_aipw_boot:>10.4f} [{ci_aipw_lower:>8.4f}, {ci_aipw_upper:>8.4f}]")
 print(f"{'RCT Gold Standard':<20} {0:>10.4f} [  -  ,   -  ]")
 
-# %% [markdown]
+
 # ## Шаг 7: Сохранение результатов
 
-# %%
+
 results = {
     "ate_aipw": ate_aipw_boot,
     "ci_aipw": (ci_aipw_lower, ci_aipw_upper),
@@ -310,10 +296,10 @@ with open(DATA_DIR / "aipw_results.pkl", "wb") as f:
 
 print(f"\nРезультаты сохранены: {DATA_DIR / 'aipw_results.pkl'}")
 
-# %% [markdown]
+
 # ## Шаг 8: Проверка робастности (Doubly Robust свойство)
 
-# %%
+
 """
 AIPW является doubly robust: он даст состоятельную оценку если
 1) Propensity model ИЛИ 2) Outcome model правильно специфицированы
@@ -330,7 +316,7 @@ ate_tlearner = mu_1.mean() - mu_0.mean()
 
 print(f"\nT-Learner ATE: {ate_tlearner:.4f}")
 
-# Чистый IPW
+
 e_x = np.clip(ps_trimmed, 0.01, 0.99)
 ipw_ate = (t_trimmed * y_trimmed / e_x).mean() - ((1 - t_trimmed) * y_trimmed / (1 - e_x)).mean()
 print(f"Pure IPW ATE: {ipw_ate:.4f}")
@@ -338,4 +324,4 @@ print(f"Pure IPW ATE: {ipw_ate:.4f}")
 print(f"\nAIPW ATE: {ate_aipw_boot:.4f}")
 print("\nВсе три оценки должны быть близки если модели хорошо специфицированы")
 
-# %%
+

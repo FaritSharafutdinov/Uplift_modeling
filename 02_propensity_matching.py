@@ -1,15 +1,3 @@
-"""
-Propensity Score Matching и IPW анализ
-ВЕРСИЯ 2.1 - Добавлены LogReg + LightGBM
-
-Исправления:
-1. Три модели: LogReg + GradientBoosting + LightGBM
-2. Overlap/positivity по порогу [0.1, 0.9]
-3. Effective sample size для IPW
-4. Extreme weights с clipping
-5. SMD до/после IPW
-6. Matching статистика (with/without replacement)
-"""
 
 import polars as pl
 import pandas as pd
@@ -31,7 +19,7 @@ import seaborn as sns
 from statsmodels.stats.weightstats import DescrStatsW
 import pickle
 
-# LightGBM (опционально)
+# LightGBM
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
@@ -39,17 +27,17 @@ except ImportError:
     LIGHTGBM_AVAILABLE = False
     print("Warning: LightGBM не установлен. Пропускаем LightGBM модель.")
 
-# Пути
+
 DATA_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
 
-# Загружаем когорту
+
 cohort = pd.read_csv(DATA_DIR / "cohort_sepsis.csv")
 print(f"Когорта: {cohort.shape}")
 print(f"Лечение: {cohort['treatment'].value_counts().to_dict()}")
 
-# ============================================================================
-# Шаг 1: Конфаундеры (УБРАЛИ has_vasopressors!)
-# ============================================================================
+
+
+
 confounder_vars = [
     # Демография
     "admission_age", "Female", "White", "Black", "Hispanic",
@@ -74,7 +62,7 @@ confounder_vars = [
 available_confounders = [col for col in confounder_vars if col in cohort.columns]
 print(f"\nИспользуемые конфаундеры ({len(available_confounders)}): {available_confounders}")
 
-# Проверка lactate_missing
+
 if "lactate_missing" not in cohort.columns:
     print("\nWARNING: lactate_missing не найден в когорте!")
     print("Запустите обновленный 01_cohort_creation.py для создания когорты с missing indicators")
@@ -85,14 +73,14 @@ X = cohort[available_confounders].values
 treatment = cohort["treatment"].values
 outcome = cohort["mortality_28days"].values
 
-# ============================================================================
+
 # Шаг 2: Propensity score - ТРИ модели: LogReg + GBM + LightGBM
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 2: Propensity score модели")
 print("="*70)
 
-# Разделяем на train/test
+
 X_train, X_test, t_train, t_test = train_test_split(
     X, treatment, test_size=0.3, random_state=42, stratify=treatment
 )
@@ -100,7 +88,7 @@ print(f"Train: {X_train.shape}, Test: {X_test.shape}")
 
 models_to_compare = {}
 
-# --- 1. LogReg baseline ---
+
 print("\n--- 1. Logistic Regression (baseline) ---")
 logreg_model = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
 logreg_model.fit(X_train, t_train)
@@ -113,7 +101,7 @@ models_to_compare["LogReg"] = {
     "auc": logreg_auc
 }
 
-# --- 2. GradientBoosting (для сравнения) ---
+
 print("\n--- 2. GradientBoostingClassifier ---")
 propensity_param_dist = {
     "n_estimators": [50, 100, 200],
@@ -147,7 +135,7 @@ models_to_compare["GradientBoosting"] = {
     "auc": gb_auc
 }
 
-# --- 3. LightGBM (опционально, если установлен) ---
+
 if LIGHTGBM_AVAILABLE:
     print("\n--- 3. LightGBM ---")
     lgb_param_dist = {
@@ -182,9 +170,9 @@ if LIGHTGBM_AVAILABLE:
         "auc": lgb_auc
     }
 
-# ============================================================================
+
 # Сравнение моделей и выбор
-# ============================================================================
+
 print("\n" + "="*70)
 print("СРАВНЕНИЕ МОДЕЛЕЙ")
 print("="*70)
@@ -192,10 +180,10 @@ print("="*70)
 for name, info in models_to_compare.items():
     print(f"{name:.<20} AUC-ROC: {info['auc']:.4f}")
 
-# Выбираем модель с лучшим AUC, но не гонимся за сложностью
-# Если LogReg AUC < 0.75, используем её (не переобучаемся)
-# Если LogReg AUC >= 0.75, используем её (достаточно хорошо)
-# Иначе используем лучшую из остальных
+
+
+
+
 if logreg_auc >= 0.70:
     print(f"\n=== ИСПОЛЬЗУЕМ LogReg (AUC={logreg_auc:.4f}, достаточно хорошо) ===")
     propensity_model = logreg_model
@@ -211,14 +199,14 @@ else:
 
 cohort["propensity_score"] = propensity_scores
 
-# ============================================================================
+
 # Шаг 3: Overlap / Positivity check
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 3: Проверка overlap / positivity")
 print("="*70)
 
-# Гистограмма
+
 plt.figure(figsize=(10, 6))
 plt.hist(
     propensity_scores[treatment == 1],
@@ -245,7 +233,7 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "propensity_distribution.png", dpi=150)
 print("Сохранено: propensity_distribution.png")
 
-# Статистики
+
 print("\n=== Propensity Score Statistics ===")
 print(f"Treated - Mean: {propensity_scores[treatment == 1].mean():.3f}, "
       f"Std: {propensity_scores[treatment == 1].std():.3f}, "
@@ -254,7 +242,7 @@ print(f"Control - Mean: {propensity_scores[treatment == 0].mean():.3f}, "
       f"Std: {propensity_scores[treatment == 0].std():.3f}, "
       f"Range: [{propensity_scores[treatment == 0].min():.3f}, {propensity_scores[treatment == 0].max():.3f}]")
 
-# Проверка positivity по порогу [0.1, 0.9] (требование ментора!)
+# Проверка positivity
 n_outside = ((propensity_scores < 0.1) | (propensity_scores > 0.9)).sum()
 n_inside = ((propensity_scores >= 0.1) & (propensity_scores <= 0.9)).sum()
 pct_outside = 100 * n_outside / len(propensity_scores)
@@ -268,9 +256,9 @@ trim_mask = (propensity_scores >= 0.1) & (propensity_scores <= 0.9)
 trimmed_cohort = cohort[trim_mask].copy()
 print(f"\nПосле trimming по [0.1, 0.9]: {trimmed_cohort.shape[0]} пациентов (удалено {(~trim_mask).sum()})")
 
-# ============================================================================
+
 # Шаг 4: Calibration plot (дополнительно)
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 4: Calibration plot")
 print("="*70)
@@ -289,9 +277,9 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "calibration_plot.png", dpi=150)
 print("Сохранено: calibration_plot.png")
 
-# ============================================================================
+
 # Шаг 5: Propensity Score Matching
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 5: Matching 1:1 nearest neighbor")
 print("="*70)
@@ -303,17 +291,17 @@ treated_ps = trimmed_cohort.loc[treated_mask_trimmed, "propensity_score"].values
 control_ps = trimmed_cohort.loc[control_mask_trimmed, "propensity_score"].values.reshape(-1, 1)
 control_indices = np.where(control_mask_trimmed)[0]
 
-# Калипер
+
 ps_std = trimmed_cohort["propensity_score"].std()
 caliper = 0.2 * ps_std
 print(f"Калипер: {caliper:.4f} (0.2 * {ps_std:.4f})")
 
-# Matching 1:1 WITHOUT replacement (по умолчанию)
+
 nn = NearestNeighbors(n_neighbors=1, metric="euclidean")
 nn.fit(control_ps)
 distances, indices = nn.kneighbors(treated_ps)
 
-# Фильтруем по калиперу
+
 valid_matches = distances[:, 0] <= caliper
 print(f"Valid matches (в пределах калипера): {valid_matches.sum()} из {len(treated_ps)}")
 
@@ -333,9 +321,9 @@ print(f"Control с повторами: {len(matched_control_indices) - len(np.un
 print(f"Treated выкинуто (вне калипера): {(~valid_matches).sum()}")
 print(f"Matching: WITHOUT replacement (по умолчанию)")
 
-# ============================================================================
+
 # Шаг 6: Баланс ковариат (SMD до/после matching)
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 6: Баланс ковариат (SMD)")
 print("="*70)
@@ -364,12 +352,12 @@ def compute_smd_weighted(mean1, mean2, var1, var2, n1, n2):
 balance_results = []
 
 for var in available_confounders:
-    # До matching (на trimmed когорте)
+    
     treated_vals = trimmed_cohort.loc[treated_mask_trimmed, var].values
     control_vals = trimmed_cohort.loc[control_mask_trimmed, var].values
     smd_before = compute_smd(treated_vals, control_vals)
     
-    # После matching
+    
     matched_treated = matched_cohort[matched_cohort["treatment"] == 1][var].values
     matched_control = matched_cohort[matched_cohort["treatment"] == 0][var].values
     smd_after = compute_smd(matched_treated, matched_control)
@@ -410,9 +398,9 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "love_plot.png", dpi=150, bbox_inches="tight")
 print("Сохранено: love_plot.png")
 
-# ============================================================================
+
 # Шаг 7: IPW с extreme weights clipping
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 7: IPW с extreme weights clipping")
 print("="*70)
@@ -420,14 +408,14 @@ print("="*70)
 ps = trimmed_cohort["propensity_score"].values
 t = trimmed_cohort["treatment"].values
 
-# Stabilized weights
+
 sw = np.where(
     t == 1, 
     ps.mean() / ps,
     (1 - ps.mean()) / (1 - ps)
 )
 
-# Extreme weights clipping (обрезаем веса > 10)
+
 sw_clipped = np.clip(sw, 0.1, 10.0)
 n_extreme = (sw > 10).sum() + (sw < 0.1).sum()
 
@@ -443,9 +431,9 @@ ess = (sw_clipped.sum())**2 / (sw_clipped**2).sum()
 print(f"\nEffective Sample Size (ESS): {ess:.0f} (из {len(trimmed_cohort)})")
 print(f"ESS ratio: {100*ess/len(trimmed_cohort):.1f}%")
 
-# ============================================================================
+
 # Шаг 8: SMD до/после IPW
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 8: SMD до/после IPW")
 print("="*70)
@@ -492,9 +480,9 @@ print(f"\nКовариат с |SMD| > 0.1 после IPW: {n_imbalanced_ipw} и�
 print("\nТоп-5 ковариат по |SMD| после IPW:")
 print(balance_ipw_df.sort_values("abs_smd_after")[["variable", "smd_before", "smd_after_ipw"]].head(5))
 
-# ============================================================================
+
 # Шаг 9: ATE оценки (IPW и Matching)
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 9: ATE оценки")
 print("="*70)
@@ -530,9 +518,9 @@ print(f"Outcome (Treated): {outcome_treated_matched:.4f}")
 print(f"Outcome (Control): {outcome_control_matched:.4f}")
 print(f"ATE (Matching): {ate_matching:.4f} ({100*ate_matching:.2f}%)")
 
-# ============================================================================
+
 # Шаг 10: Bootstrap CI
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 10: Bootstrap 95% CI")
 print("="*70)
@@ -567,7 +555,7 @@ def bootstrap_ate(data, treatment_col, outcome_col, weights_col=None, n_bootstra
     
     return ate_samples.mean(), ci_lower, ci_upper, ate_samples
 
-# Bootstrap для IPW
+
 print("Вычисляем bootstrap CI для IPW (n=500)...")
 ate_ipw_boot, ci_ipw_lower, ci_ipw_upper, ipw_samples = bootstrap_ate(
     trimmed_cohort, "treatment", "mortality_28days", "ipw_weight", n_bootstrap=500
@@ -577,7 +565,7 @@ print(f"\nIPW ATE: {ate_ipw_boot:.4f}")
 print(f"95% CI: [{ci_ipw_lower:.4f}, {ci_ipw_upper:.4f}]")
 print(f"Значимо: {'Да' if (ci_ipw_lower > 0 or ci_ipw_upper < 0) else 'Нет'}")
 
-# Bootstrap для Matching
+
 print("\nВычисляем bootstrap CI для Matching (n=500)...")
 ate_match_boot, ci_match_lower, ci_match_upper, match_samples = bootstrap_ate(
     matched_cohort, "treatment", "mortality_28days", None, n_bootstrap=500
@@ -587,7 +575,7 @@ print(f"\nMatching ATE: {ate_match_boot:.4f}")
 print(f"95% CI: [{ci_match_lower:.4f}, {ci_match_upper:.4f}]")
 print(f"Значимо: {'Да' if (ci_match_lower > 0 or ci_match_upper < 0) else 'Нет'}")
 
-# Визуализация bootstrap
+
 plt.figure(figsize=(10, 5))
 plt.hist(ipw_samples, bins=50, alpha=0.7, color="blue", edgecolor="black")
 plt.axvline(x=0, color="red", linestyle="--", linewidth=2, label="Null effect")
@@ -602,9 +590,9 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "bootstrap_ipw.png", dpi=150)
 print("Сохранено: bootstrap_ipw.png")
 
-# ============================================================================
+
 # Шаг 11: Сохранение результатов
-# ============================================================================
+
 print("\n" + "="*70)
 print("ШАГ 11: Сохранение результатов")
 print("="*70)
@@ -627,9 +615,9 @@ with open(DATA_DIR / "ps_matching_results.pkl", "wb") as f:
 
 print(f"Результаты сохранены: {DATA_DIR / 'ps_matching_results.pkl'}")
 
-# ============================================================================
+
 # ИТОГОВАЯ ТАБЛИЦА
-# ============================================================================
+
 print("\n" + "="*70)
 print("ИТОГОВАЯ ТАБЛИЦА")
 print("="*70)

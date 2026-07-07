@@ -1,8 +1,3 @@
-# %%
-"""
-Summary результатов causal inference анализа
-Сводка всех методов и сравнение с результатами авторов
-"""
 
 import pandas as pd
 import numpy as np
@@ -13,14 +8,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Пути
+
 DATA_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
 
-# %% [markdown]
+
 # ## Загрузка всех результатов
 
-# %%
-# Загружаем результаты
+
+
 results = {}
 
 try:
@@ -47,10 +42,10 @@ except Exception as e:
     print(f"✗ CATE results: {e}")
     results["cate"] = None
 
-# %% [markdown]
+
 # ## Таблица 1: ATE оценки всеми методами
 
-# %%
+
 print("="*70)
 print("ТАБЛИЦА 1: ATE ОЦЕНКИ (28-day mortality)")
 print("="*70)
@@ -75,10 +70,10 @@ for method_name, result_key, ate_key, ci_key in methods:
 print("-"*70)
 print(f"{'RCT Gold Standard (Caironi 2014)':<25} {0:>10.4f} {'[  -  ,   -  ]':>30} {'-':>10}")
 
-# %% [markdown]
+
 # ## Таблица 2: CATE по подгруппам
 
-# %%
+
 if results["cate"] is not None:
     print("\n" + "="*70)
     print("ТАБЛИЦА 2: CATE ОЦЕНКИ ПО ПОДГРУППАМ")
@@ -105,10 +100,10 @@ if results["cate"] is not None:
     print(f"{'Age < 60':<30} {age_lt.get('cate', 'N/A'):>10.4f} {age_lt.get('n', 'N/A'):>10} {'N/A':>25}")
     print(f"{'Age >= 60':<30} {age_ge.get('cate', 'N/A'):>10.4f} {age_ge.get('n', 'N/A'):>10} {'N/A':>25}")
 
-# %% [markdown]
+
 # ## Сравнение с результатами авторов
 
-# %%
+
 print("\n" + "="*70)
 print("СРАВНЕНИЕ С РЕЗУЛЬТАТАМИ АВТОРОВ (Doutreligne et al.)")
 print("="*70)
@@ -137,13 +132,13 @@ if results["cate"] is not None:
     else:
         print("    ✗ Не показывает benefit (отличие от авторов)")
 
-# %% [markdown]
+
 # ## Визуализация: Forest plot всех оценок
 
-# %%
+
 plt.figure(figsize=(12, 8))
 
-# Собираем все ATE оценки
+
 ate_estimates = []
 ate_labels = []
 ate_cis = []
@@ -163,7 +158,7 @@ if results["aipw"] is not None:
     ate_labels.append("AIPW (Doubly Robust)")
     ate_cis.append(results["aipw"]["ci_aipw"])
 
-# RCT gold standard
+
 ate_estimates.append(0)
 ate_labels.append("RCT Gold Standard")
 ate_cis.append((0, 0))
@@ -171,7 +166,7 @@ ate_cis.append((0, 0))
 # Forest plot
 y_pos = np.arange(len(ate_estimates))
 
-# Plot each point individually to handle colors
+
 for i, (estimate, ci) in enumerate(zip(ate_estimates, ate_cis)):
     color = "blue" if i < len(ate_estimates) - 1 else "green"
     xerr = [[estimate - ci[0]], [ci[1] - estimate]]
@@ -195,10 +190,10 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "forest_plot_ate.png", dpi=150, bbox_inches="tight")
 # plt.show()
 
-# %% [markdown]
+
 # ## Визуализация: CATE по подгруппам
 
-# %%
+
 if results["cate"] is not None:
     plt.figure(figsize=(10, 6))
     
@@ -221,10 +216,10 @@ if results["cate"] is not None:
     plt.tight_layout()
     plt.savefig(DATA_DIR / "forest_plot_cate.png", dpi=150, bbox_inches="tight")
 
-# %% [markdown]
+
 # ## Критерии успеха
 
-# %%
+
 print("\n" + "="*70)
 print("ПРОВЕРКА КРИТЕРИЕВ УСПЕХА")
 print("="*70)
@@ -275,10 +270,10 @@ else:
     print("  - Недостаточная импутация пропусков")
     print("  - Нужна дополнительная настройка гиперпараметров")
 
-# %% [markdown]
+
 # ## Выводы
 
-# %%
+
 print("\n" + "="*70)
 print("ВЫВОДЫ")
 print("="*70)
@@ -306,4 +301,4 @@ print("""
    - Требуется внешняя валидация
 """)
 
-# %%
+

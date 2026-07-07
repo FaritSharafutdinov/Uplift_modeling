@@ -1,14 +1,3 @@
-# %%
-"""
-CATE (Conditional Average Treatment Effect) анализ
-Адаптировано из causal_ehr_mimic авторов под MIMIC-IV v3.1
-
-Анализируем гетерогенность эффекта лечения для разных подгрупп:
-- Septic shock (ключевой effect modifier!)
-- Возраст (<60 vs >=60)
-- Пол (Female vs Male)
-- Раса (White vs Non-White)
-"""
 
 import polars as pl
 import pandas as pd
@@ -24,20 +13,20 @@ import seaborn as sns
 import warnings
 warnings.filterwarnings("ignore")
 
-# Пути
+
 DATA_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
 
-# Загружаем когорту
+
 cohort = pd.read_csv(DATA_DIR / "cohort_sepsis.csv")
 print(f"Когорта: {cohort.shape}")
 
-# %% [markdown]
+
 # ## Шаг 1: Создаем effect modifiers
 
-# %%
-# Ключевые effect modifiers из методологии авторов
+
+
 # 1. Septic shock (сепсис + вазопрессоры + лактат > 2)
-# Проверяем есть ли уже septic_shock
+
 if "septic_shock" not in cohort.columns:
     cohort["septic_shock"] = (
         (cohort.get("sepsis", False) == True) &
@@ -61,11 +50,11 @@ print(f"  Age >= 60: {cohort['age_ge_60'].mean():.2%}")
 print(f"  Female: {cohort['female'].mean():.2%}")
 print(f"  White: {cohort['white'].mean():.2%}")
 
-# %% [markdown]
+
 # ## Шаг 2: CATE через causal forest / T-learner
 
-# %%
-# Готовим данные
+
+
 confounder_vars = [
     "admission_age", "Female", "White", "Black", "Hispanic",
     "emergency_admission", "insurance_Medicare", "insurance_Medicaid",
@@ -82,13 +71,13 @@ X = cohort[available_confounders].values
 t = cohort["treatment"].values
 y = cohort["mortality_28days"].values
 
-# Effect modifiers для стратификации
+
 effect_modifiers = ["septic_shock", "age_ge_60", "female", "white"]
 
-# %% [markdown]
+
 # ## Шаг 3: T-Learner для CATE
 
-# %%
+
 def t_learner_cate(X, t, y, X_modifiers=None, random_state=42):
     """
     T-Learner для оценки CATE
@@ -125,7 +114,7 @@ def t_learner_cate(X, t, y, X_modifiers=None, random_state=42):
     )
     outcome_control.fit(X_control, y_control)
     
-    # Предсказываем CATE для всех
+    
     mu_1 = outcome_treated.predict(X)
     mu_0 = outcome_control.predict(X)
     cate = mu_1 - mu_0
@@ -142,10 +131,10 @@ print(f"  Min: {cate_scores.min():.4f}")
 print(f"  Max: {cate_scores.max():.4f}")
 print(f"  Median: {np.median(cate_scores):.4f}")
 
-# %% [markdown]
+
 # ## Шаг 4: CATE по подгруппам
 
-# %%
+
 def cate_by_subgroup(cate, subgroup, subgroup_name):
     """CATE для бинарной подгруппы"""
     mask_0 = subgroup == 0
@@ -176,13 +165,13 @@ for modifier in effect_modifiers:
         result = cate_by_subgroup(cate_scores, cohort[modifier].values, modifier)
         cate_results.append(result)
 
-# %% [markdown]
+
 # ## Шаг 5: Визуализация CATE по подгруппам
 
-# %%
+
 plt.figure(figsize=(12, 6))
 
-# Forest plot
+
 y_pos = np.arange(len(cate_results) * 2)
 cate_values = []
 cate_labels = []
@@ -196,7 +185,7 @@ for i, result in enumerate(cate_results):
         f"{result['subgroup']}=1 (n={result['n_1']})"
     ])
     
-# Горизонтальный forest plot
+
 colors = ["blue" if v < 0 else "red" for v in cate_values]
 plt.barh(np.arange(len(cate_values)), cate_values, color=colors, alpha=0.7)
 plt.yticks(np.arange(len(cate_values)), cate_labels)
@@ -208,11 +197,11 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "cate_forest_plot.png", dpi=150, bbox_inches="tight")
 
 
-# %% [markdown]
+
 # ## Шаг 6: CATE для septic shock (ключевой анализ!)
 
-# %%
-# Детальный анализ для septic shock
+
+
 septic_shock_mask = cohort["septic_shock"].values == 1
 no_septic_shock_mask = cohort["septic_shock"].values == 0
 
@@ -224,12 +213,12 @@ print(f"Без септического шока (n={no_septic_shock_mask.sum()}
 print(f"С септическим шоком (n={septic_shock_mask.sum()}): CATE = {cate_septic_shock:.4f}")
 print(f"Разница: {cate_septic_shock - cate_no_septic_shock:.4f}")
 
-# Ожидаемый результат из статьи:
+
 # - Septic shock: CATE < 0 (benefit от альбумина)
 # - No septic shock: CATE ≈ 0 (нет эффекта)
 
-# %%
-# Визуализация
+
+
 plt.figure(figsize=(8, 5))
 
 subgroups = ["No Septic Shock", "Septic Shock"]
@@ -243,7 +232,7 @@ plt.ylabel("CATE (Treatment Effect)")
 plt.title(f"CATE: Septic Shock Subgroups\n(Albumin effect on 28-day mortality)")
 plt.grid(alpha=0.3, axis="y")
 
-# Добавляем значения на бары
+
 for i, (v, n) in enumerate(zip(cate_vals, ns)):
     plt.text(i, v + np.sign(v) * 0.01, f"{v:.3f}\n(n={n})", ha="center", va="bottom" if v > 0 else "top")
 
@@ -251,10 +240,10 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "cate_septic_shock.png", dpi=150)
 
 
-# %% [markdown]
+
 # ## Шаг 7: CATE по возрасту
 
-# %%
+
 age_lt_60_mask = cohort["age_ge_60"].values == 0
 age_ge_60_mask = cohort["age_ge_60"].values == 1
 
@@ -265,7 +254,7 @@ print("\n=== DETAIL: Age CATE ===")
 print(f"Age < 60 (n={age_lt_60_mask.sum()}): CATE = {cate_age_lt_60:.4f}")
 print(f"Age >= 60 (n={age_ge_60_mask.sum()}): CATE = {cate_age_ge_60:.4f}")
 
-# %%
+
 plt.figure(figsize=(8, 5))
 
 subgroups = ["Age < 60", "Age >= 60"]
@@ -286,10 +275,10 @@ plt.tight_layout()
 plt.savefig(DATA_DIR / "cate_age.png", dpi=150)
 
 
-# %% [markdown]
+
 # ## Шаг 8: Bootstrap CI для CATE по подгруппам
 
-# %%
+
 def bootstrap_cate_subgroup(X, t, y, subgroup, n_bootstrap=500, random_state=42):
     """Bootstrap CI для CATE в подгруппе"""
     np.random.seed(random_state)
@@ -303,10 +292,10 @@ def bootstrap_cate_subgroup(X, t, y, subgroup, n_bootstrap=500, random_state=42)
         y_boot = y[idx]
         subgroup_boot = subgroup[idx]
         
-        # T-learner
+        
         cate_boot, _, _ = t_learner_cate(X_boot, t_boot, y_boot, random_state=i)
         
-        # CATE для subgroup=1
+        
         mask = subgroup_boot == 1
         if mask.sum() > 0:
             cate_subgroup = cate_boot[mask].mean()
@@ -321,7 +310,7 @@ def bootstrap_cate_subgroup(X, t, y, subgroup, n_bootstrap=500, random_state=42)
     
     return cate_samples.mean(), ci_lower, ci_upper
 
-# %%
+
 print("=== Bootstrap CI для CATE (Septic Shock) ===")
 cate_ss_mean, cate_ss_ci_lower, cate_ss_ci_upper = bootstrap_cate_subgroup(
     X, t, y, cohort["septic_shock"].values, n_bootstrap=500
@@ -331,10 +320,10 @@ if cate_ss_mean is not None:
     print(f"Septic shock: CATE = {cate_ss_mean:.4f}, 95% CI = [{cate_ss_ci_lower:.4f}, {cate_ss_ci_upper:.4f}]")
     print(f"Значимый benefit: {'Да' if cate_ss_ci_upper < 0 else 'Нет'}")
 
-# %% [markdown]
+
 # ## Шаг 9: Сохранение результатов
 
-# %%
+
 import pickle
 
 cate_results_full = {
@@ -364,10 +353,10 @@ with open(DATA_DIR / "cate_results.pkl", "wb") as f:
 
 print(f"\nРезультаты CATE сохранены: {DATA_DIR / 'cate_results.pkl'}")
 
-# %% [markdown]
+
 # ## Шаг 10: Сводная таблица всех результатов
 
-# %%
+
 print("\n" + "="*70)
 print("СВОДНАЯ ТАБЛИЦА РЕЗУЛЬТАТОВ")
 print("="*70)
@@ -391,4 +380,4 @@ if cate_septic_shock < 0:
 else:
     print(f"   ✗ Альбумин не показывает benefit для пациентов с септическим шоком")
 
-# %%
+

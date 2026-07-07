@@ -1,14 +1,5 @@
 """
 Создание когорты для causal inference анализа альбумина при сепсисе
-ВЕРСИЯ 2.0 - Исправлена по требованиям ментора
-
-Ключевые исправления:
-1. TIME ZERO = первое введение кристаллоидов (НЕ ICU intime!)
-2. Альбумин должен быть в окне [time_zero, time_zero + 24h]
-3. Фильтр los_icu_hours >= 24
-4. Исключение late albumin (>24ч после time_zero)
-5. Cohort counts на каждом этапе
-6. Missing indicators для признаков с большим missingness
 """
 
 import polars as pl
@@ -17,7 +8,6 @@ import numpy as np
 from pathlib import Path
 from sklearn.impute import KNNImputer
 
-# Пути к данным
 MIMIC_DIR = Path("/Users/faritsharafutdinov/untitled folder/mimic-iv-3.1/mimiciv_as_parquet")
 MIMIC_ICU = MIMIC_DIR / "mimiciv_icu"
 MIMIC_HOSP = MIMIC_DIR / "mimiciv_hosp"
@@ -25,13 +15,9 @@ MIMIC_DERIVED = MIMIC_DIR / "mimiciv_derived"
 
 pd.set_option("display.max_columns", None)
 
-# ============================================================================
-# COHORT COUNTS - отслеживаем количество пациентов на каждом этапе
-# ============================================================================
 cohort_counts = {}
 
 print("="*70)
-print("ШАГ 1: Базовая популяция (ICU stays)")
 print("="*70)
 
 # Загружаем icustays
@@ -47,7 +33,6 @@ base_population = icustays.join(
     how="left"
 )
 
-# Возраст
 base_population = base_population.with_columns(
     (
         pl.col("anchor_age") + 
@@ -55,12 +40,10 @@ base_population = base_population.with_columns(
     ).alias("admission_age")
 )
 
-# Фильтры: возраст >= 18
 base_population = base_population.filter(pl.col("admission_age") >= 18)
 cohort_counts["adults_age_ge_18"] = base_population.shape[0]
 print(f"После фильтра возраст >= 18: {cohort_counts['adults_age_ge_18']}")
 
-# LOS >= 24 часов (исправляем: было los >= 1.0 дня)
 base_population = base_population.with_columns(
     (pl.col("los") * 24).alias("los_icu_hours")
 )
@@ -68,47 +51,28 @@ base_population = base_population.filter(pl.col("los_icu_hours") >= 24)
 cohort_counts["los_ge_24h"] = base_population.shape[0]
 print(f"После фильтра LOS >= 24ч: {cohort_counts['los_ge_24h']}")
 
-# Первый ICU stay
 base_population = base_population.sort(["subject_id", "intime"]).groupby("subject_id").first()
 cohort_counts["first_stay"] = base_population.shape[0]
-print(f"Первый ICU stay для каждого пациента: {cohort_counts['first_stay']}")
+print(f"Первый ICU stay: {cohort_counts['first_stay']}")
 
-# Пол
 base_population = base_population.with_columns(
     (pl.col("gender") == "F").cast(pl.Int32).alias("Female"),
     (pl.col("gender") == "M").cast(pl.Int32).alias("Male")
 )
 
 print("\n" + "="*70)
-print("ШАГ 2: TIME ZERO - первое введение кристаллоидов")
 print("="*70)
-print("КРИТИЧНО: Time zero = first crystalloid (НЕ ICU intime!)")
 
 input_events = pl.read_parquet(MIMIC_ICU / "inputevents")
 
-# Crystalloids itemids (из методологии авторов)
 crystalloids_itemids = [
-    226364,  # OR crystalloids
-    226375,  # PACU crystalloids
-    225158,  # NaCl 0.9%
-    225159,  # NaCl 0.45%
-    225161,  # NaCl 3%
-    220967,  # D5RL
-    220968,  # D10RL
-    220964,  # D5NS
-    220965,  # D5 1/2NS
+    226364, 226375, 225158, 225159, 225161,
+    220967, 220968, 220964, 220965,
 ]
 
-# Находим первое введение кристаллоидов для каждого stay_id
 crystalloids_first = (
-    input_events.filter(
-        pl.col("itemid").is_in(crystalloids_itemids)
-    )
-    .join(
-        base_population.select(["stay_id", "intime"]),
-        on="stay_id",
-        how="inner"
-    )
+    input_events.filter(pl.col("itemid").is_in(crystalloids_itemids))
+    .join(base_population.select(["stay_id", "intime"]), on="stay_id", how="inner")
     .sort(["stay_id", "starttime"])
     .groupby("stay_id")
     .first()
@@ -116,56 +80,39 @@ crystalloids_first = (
     .rename({"starttime": "time_zero"})
 )
 
-# Проверяем что кристаллоиды введены в первые 24 часа ICU stay
 crystalloids_first = crystalloids_first.with_columns(
     ((pl.col("time_zero") - pl.col("intime")).dt.hours()).alias("hours_from_icu")
 )
 
-# Фильтр: кристаллоиды в первые 24 часа
 crystalloids_first = crystalloids_first.filter(
     (pl.col("hours_from_icu") >= 0) & (pl.col("hours_from_icu") <= 24)
 )
 cohort_counts["crystalloids_in_24h"] = crystalloids_first.shape[0]
 print(f"Пациенты с кристаллоидами в первые 24ч: {cohort_counts['crystalloids_in_24h']}")
-print(f"Медиана часов от ICU до кристаллоидов: {crystalloids_first['hours_from_icu'].median():.2f}")
 
-# Присоединяем time_zero к base_population
 base_population = base_population.join(
     crystalloids_first.select(["stay_id", "time_zero"]),
     on="stay_id",
-    how="inner"  # Только у кого есть кристаллоиды в первые 24ч
+    how="inner"
 )
 cohort_counts["with_time_zero"] = base_population.shape[0]
 print(f"После добавления time_zero: {cohort_counts['with_time_zero']}")
 
 print("\n" + "="*70)
-print("ШАГ 3: Admissions (demographics)")
 print("="*70)
 
 admissions = pl.read_parquet(MIMIC_HOSP / "admissions")
 
 base_population = base_population.join(
-    admissions.select([
-        "subject_id", "hadm_id", "admission_type", "insurance", "race",
-        "admittime", "dischtime", "deathtime"
-    ]),
+    admissions.select(["subject_id", "hadm_id", "admission_type", "insurance", "race", "admittime", "dischtime", "deathtime"]),
     on=["subject_id", "hadm_id"],
     how="left"
 )
 
-# Emergency admission
 base_population = base_population.with_columns(
-    (pl.col("admission_type") == "EMERGENCY").cast(pl.Int32).alias("emergency_admission")
-)
-
-# Insurance
-base_population = base_population.with_columns(
+    (pl.col("admission_type") == "EMERGENCY").cast(pl.Int32).alias("emergency_admission"),
     (pl.col("insurance") == "Medicare").cast(pl.Int32).alias("insurance_Medicare"),
     (pl.col("insurance") == "Medicaid").cast(pl.Int32).alias("insurance_Medicaid"),
-)
-
-# Race
-base_population = base_population.with_columns(
     (pl.col("race").str.to_lowercase().str.contains("white")).cast(pl.Int32).alias("White"),
     (pl.col("race").str.to_lowercase().str.contains("black")).cast(pl.Int32).alias("Black"),
     (pl.col("race").str.to_lowercase().str.contains("hispanic")).cast(pl.Int32).alias("Hispanic"),
@@ -175,12 +122,11 @@ cohort_counts["with_demographics"] = base_population.shape[0]
 print(f"После admissions: {cohort_counts['with_demographics']}")
 
 print("\n" + "="*70)
-print("ШАГ 4: Конфаундеры - Витальные признаки (за 24ч ДО time_zero!)")
 print("="*70)
 
 vitalsign = pl.read_parquet(MIMIC_DERIVED / "vitalsign")
 
-# ВАЖНО: витальные за 24ч ДО time_zero (crystalloid), НЕ до ICU intime
+# Витальные за 24ч ДО time_zero
 vitalsign_window = vitalsign.join(
     base_population.select(["stay_id", "time_zero"]),
     on="stay_id",
@@ -202,10 +148,9 @@ base_population = base_population.join(vitalsign_agg, on="stay_id", how="left")
 print("Витальные признаки добавлены (за 24ч до time_zero)")
 
 print("\n" + "="*70)
-print("ШАГ 5: Конфаундеры - RRT, Ventilation, Vasopressors (ДО time_zero!)")
 print("="*70)
 
-# RRT - до time_zero
+
 rrt = pl.read_parquet(MIMIC_DERIVED / "rrt")
 rrt_window = rrt.join(
     base_population.select(["stay_id", "time_zero"]),
@@ -223,7 +168,7 @@ base_population = base_population.with_columns(
 )
 print(f"RRT: {base_population.filter(pl.col('rrt_flag') == 1).shape[0]}")
 
-# Ventilation - до time_zero
+
 ventilation = pl.read_parquet(MIMIC_DERIVED / "ventilation")
 vent_window = ventilation.join(
     base_population.select(["stay_id", "time_zero"]),
@@ -241,7 +186,7 @@ base_population = base_population.with_columns(
 )
 print(f"Ventilation: {base_population.filter(pl.col('ventilation_flag') == 1).shape[0]}")
 
-# Vasopressors - до time_zero
+
 vasoactive = pl.read_parquet(MIMIC_DERIVED / "vasoactive_agent")
 vaso_window = vasoactive.join(
     base_population.select(["stay_id", "time_zero"]),
@@ -260,16 +205,15 @@ base_population = base_population.with_columns(
 print(f"Vasopressors: {base_population.filter(pl.col('has_vasopressors') == 1).shape[0]}")
 
 print("\n" + "="*70)
-print("ШАГ 6: Лактат (за 24ч ДО time_zero) + Missing indicator")
 print("="*70)
 
-# Из first_day_sofa
+
 sofa = pl.read_parquet(MIMIC_DERIVED / "first_day_sofa")
 lactate_sofa = sofa.select(["stay_id", "lactate"]).rename({"lactate": "lactate_sofa"})
 
 base_population = base_population.join(lactate_sofa, on="stay_id", how="left")
 
-# Из labevents - за 24ч до time_zero
+
 labevents = pl.read_parquet(MIMIC_HOSP / "labevents")
 lactate_itemids = [50813, 50815, 52442, 53154]
 
@@ -292,12 +236,12 @@ base_population = base_population.join(
     how="left"
 )
 
-# Объединяем
+
 base_population = base_population.with_columns(
     pl.coalesce("lactate_lab", "lactate_sofa").alias("lactate_final")
 )
 
-# Missing indicator для лактата (критично! >50% пропусков)
+# Missing indicator для лактата
 base_population = base_population.with_columns(
     pl.col("lactate_final").is_null().cast(pl.Int32).alias("lactate_missing")
 )
@@ -306,7 +250,6 @@ n_lactate_missing = base_population.filter(pl.col('lactate_missing') == 1).shape
 print(f"Лактат добавлен, пропусков: {n_lactate_missing} ({100*n_lactate_missing/base_population.shape[0]:.1f}%)")
 
 print("\n" + "="*70)
-print("ШАГ 7: Антибиотики (за 24ч ДО time_zero)")
 print("="*70)
 
 prescriptions = pl.read_parquet(MIMIC_HOSP / "prescriptions")
@@ -348,7 +291,6 @@ for cls, patterns in antibiotic_classes.items():
 print("Антибиотики добавлены (за 24ч до time_zero)")
 
 print("\n" + "="*70)
-print("ШАГ 8: Charlson Comorbidity Index")
 print("="*70)
 
 diagnoses_icd = pl.read_parquet(MIMIC_HOSP / "diagnoses_icd")
@@ -402,20 +344,19 @@ base_population = base_population.with_columns(
 print(f"Charlson index: mean={base_population['charlson_comorbidity_index'].mean():.2f}")
 
 print("\n" + "="*70)
-print("ШАГ 9: СЕПСИС (suspicion + organ dysfunction)")
 print("="*70)
 
 suspicion = pl.read_parquet(MIMIC_DERIVED / "suspicion_of_infection")
 
-# Присоединяем suspicion
+
 base_population = base_population.join(
     suspicion.select(["hadm_id", "suspected_infection_time"]),
     on="hadm_id",
     how="left"
 )
 
-# Сепсис = suspicion в окне [-24ч до time_zero, +24ч после time_zero] + organ dysfunction
-# Organ dysfunction = лактат > 2 ИЛИ вазопрессоры ИЛИ вентиляция ИЛИ RRT
+
+
 base_population = base_population.with_columns(
     (
         (pl.col("suspected_infection_time").is_not_null()) &
@@ -436,7 +377,7 @@ sepsis_pop = base_population.filter(pl.col("sepsis") == True)
 cohort_counts["sepsis_proxy"] = sepsis_pop.shape[0]
 print(f"Пациентов с сепсисом: {cohort_counts['sepsis_proxy']}")
 
-# Септический шок = сепсис + вазопрессоры + лактат > 2
+
 sepsis_pop = sepsis_pop.with_columns(
     (
         (pl.col("sepsis") == True) &
@@ -448,7 +389,6 @@ sepsis_pop = sepsis_pop.with_columns(
 print(f"С септическим шоком: {sepsis_pop.filter(pl.col('septic_shock') == True).shape[0]}")
 
 print("\n" + "="*70)
-print("ШАГ 10: ЛЕЧЕНИЕ АЛЬБУМИНОМ (в окне [time_zero, time_zero + 24h])")
 print("="*70)
 print("КРИТИЧНО: Albumin должен быть в первые 24ч ПОСЛЕ кристаллоидов")
 
@@ -462,7 +402,7 @@ print(f"Найдено itemids для albumin: {albumin_items.shape[0]}")
 if albumin_items.shape[0] > 0:
     albumin_itemids = albumin_items["itemid"].to_list()
     
-    # Альбумин в окне [time_zero, time_zero + 24h]
+    
     albumin_window = input_events.filter(
         pl.col("itemid").is_in(albumin_itemids)
     ).join(
@@ -486,7 +426,7 @@ if albumin_items.shape[0] > 0:
         (pl.col("albumin_time").is_not_null()).cast(pl.Int32).alias("treatment")
     )
     
-    # Считаем late albumin (>24ч после time_zero) - для отчета
+    
     late_albumin = input_events.filter(
         pl.col("itemid").is_in(albumin_itemids)
     ).join(
@@ -511,7 +451,7 @@ if albumin_items.shape[0] > 0:
     n_late = sepsis_pop.filter(pl.col('late_albumin') == 1).shape[0]
     print(f"Пациентов с late albumin (>24ч): {n_late} (исключаем из анализа)")
     
-    # Исключаем late albumin из финальной когорты
+    
     sepsis_pop = sepsis_pop.filter(pl.col("late_albumin") == 0)
     cohort_counts["exclude_late_albumin"] = n_late
     
@@ -525,10 +465,9 @@ print(f"Лечение (альбумин в первые 24ч): {sepsis_pop.filt
 print(f"Контроль: {sepsis_pop.filter(pl.col('treatment') == 0).shape[0]}")
 
 print("\n" + "="*70)
-print("ШАГ 11: Исход (28-day mortality ОТ time_zero)")
 print("="*70)
 
-# 28 дней от time_zero (НЕ от ICU intime!)
+# 28-day mortality от time_zero
 sepsis_pop = sepsis_pop.with_columns(
     (
         (pl.col("deathtime").is_not_null()) &
@@ -541,7 +480,6 @@ cohort_counts["known_outcome"] = sepsis_pop.shape[0]
 print(f"28-day mortality: {n_mortality} ({100*n_mortality/sepsis_pop.shape[0]:.1f}%)")
 
 print("\n" + "="*70)
-print("ШАГ 12: Финальная когорта + импутация + missing indicators")
 print("="*70)
 
 # Отбор конфаундеров (УБРАЛИ has_vasopressors из конфаундеров - это часть определения сепсиса!)
@@ -561,7 +499,7 @@ confounder_cols = [
 available_cols = [col for col in confounder_cols if col in sepsis_pop.columns]
 cohort_final = sepsis_pop.select(available_cols)
 
-# Импутация
+
 cohort_pd = cohort_final.to_pandas()
 id_cols = ["stay_id", "subject_id", "hadm_id"]
 target_cols = ["treatment", "mortality_28days", "sepsis", "septic_shock"]
@@ -571,7 +509,7 @@ print(f"Конфаундеры ({len(confounder_vars)}): {confounder_vars}")
 
 X = cohort_pd[confounder_vars].copy()
 
-# KNN импутация
+
 imputer = KNNImputer(n_neighbors=10)
 X_imputed = imputer.fit_transform(X)
 cohort_pd[confounder_vars] = X_imputed
@@ -579,7 +517,7 @@ cohort_pd[confounder_vars] = X_imputed
 n_missing_after = cohort_pd[confounder_vars].isnull().sum().sum()
 print(f"Пропусков после импутации: {n_missing_after}")
 
-# Сохранение
+
 OUTPUT_DIR = Path("/Users/faritsharafutdinov/untitled folder/notebook_new")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -607,11 +545,11 @@ print(f"28-day mortality: {cohort_pd['mortality_28days'].sum()} ({100*cohort_pd[
 print("\n" + "="*70)
 print("КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ВНЕСЕНЫ:")
 print("="*70)
-print("✓ Time zero = first crystalloid (НЕ ICU intime)")
-print("✓ Albumin в окне [time_zero, time_zero + 24h]")
-print("✓ LOS >= 24 часов (явный фильтр)")
-print("✓ Late albumin исключен из когорты")
-print("✓ Missing indicator для lactate добавлен")
-print("✓ has_vasopressors убран из конфаундеров")
-print("✓ 28-day mortality от time_zero (НЕ от ICU)")
+print("Time zero = first crystalloid (НЕ ICU intime)")
+print("Albumin в окне [time_zero, time_zero + 24h]")
+print("LOS >= 24 часов (явный фильтр)")
+print("Late albumin исключен из когорты")
+print("Missing indicator для lactate добавлен")
+print("has_vasopressors убран из конфаундеров")
+print("28-day mortality от time_zero (НЕ от ICU)")
 print("="*70)
