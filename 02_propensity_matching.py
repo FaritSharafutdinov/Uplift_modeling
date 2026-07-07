@@ -18,7 +18,11 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, calibration_curve
+from sklearn.metrics import roc_auc_score
+try:
+    from sklearn.metrics import calibration_curve
+except ImportError:
+    from sklearn.calibration import calibration_curve
 from sklearn.neighbors import NearestNeighbors
 import matplotlib
 matplotlib.use('Agg')
@@ -338,10 +342,23 @@ print("="*70)
 
 def compute_smd(group1, group2):
     """Standardized Mean Difference"""
+    # Если переданы уже скалярные mean (для взвешенных данных)
+    if np.isscalar(group1) or np.isscalar(group2):
+        return 0  # Для взвешенных SMD используем упрощенную версию
+    
     n1, n2 = len(group1), len(group2)
     mean1, mean2 = group1.mean(), group2.mean()
     var1, var2 = group1.var(), group2.var()
     pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
+    if pooled_std == 0:
+        return 0
+    return (mean1 - mean2) / pooled_std
+
+def compute_smd_weighted(mean1, mean2, var1, var2, n1, n2):
+    """SMD для взвешенных данных (использует средние и дисперсии)"""
+    pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
+    if pooled_std == 0:
+        return 0
     return (mean1 - mean2) / pooled_std
 
 balance_results = []
@@ -450,7 +467,14 @@ for var in available_confounders:
     treated_weighted = DescrStatsW(treated_vals, weights=treated_weights, ddof=0)
     control_weighted = DescrStatsW(control_vals, weights=control_weights, ddof=0)
     
-    smd_after = compute_smd(treated_weighted.mean, control_weighted.mean)
+    # Используем упрощенный SMD для взвешенных данных
+    n_treated = treated_mask_trimmed.sum()
+    n_control = control_mask_trimmed.sum()
+    smd_after = compute_smd_weighted(
+        treated_weighted.mean, control_weighted.mean,
+        treated_weighted.var, control_weighted.var,
+        n_treated, n_control
+    )
     
     balance_ipw_results.append({
         "variable": var,
@@ -607,7 +631,7 @@ print(f"Результаты сохранены: {DATA_DIR / 'ps_matching_result
 # ИТОГОВАЯ ТАБЛИЦА
 # ============================================================================
 print("\n" + "="*70)
-print="ИТОГОВАЯ ТАБЛИЦА")
+print("ИТОГОВАЯ ТАБЛИЦА")
 print("="*70)
 print(f"{'Метод':<20} {'ATE':>10} {'95% CI':>25} {'Значимо?':>10}")
 print("-" * 70)

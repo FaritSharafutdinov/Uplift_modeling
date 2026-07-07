@@ -69,7 +69,7 @@ cohort_counts["los_ge_24h"] = base_population.shape[0]
 print(f"После фильтра LOS >= 24ч: {cohort_counts['los_ge_24h']}")
 
 # Первый ICU stay
-base_population = base_population.sort(["subject_id", "intime"]).group_by("subject_id").first()
+base_population = base_population.sort(["subject_id", "intime"]).groupby("subject_id").first()
 cohort_counts["first_stay"] = base_population.shape[0]
 print(f"Первый ICU stay для каждого пациента: {cohort_counts['first_stay']}")
 
@@ -110,7 +110,7 @@ crystalloids_first = (
         how="inner"
     )
     .sort(["stay_id", "starttime"])
-    .group_by("stay_id")
+    .groupby("stay_id")
     .first()
     .select(["stay_id", "starttime", "intime"])
     .rename({"starttime": "time_zero"})
@@ -190,7 +190,7 @@ vitalsign_window = vitalsign.join(
     (pl.col("charttime") <= pl.col("time_zero"))
 )
 
-vitalsign_agg = vitalsign_window.group_by("stay_id").agg(
+vitalsign_agg = vitalsign_window.groupby("stay_id").agg(
     pl.col("heart_rate").mean().alias("hr_mean"),
     pl.col("spo2").mean().alias("spo2_mean"),
     pl.col("mbp").mean().alias("mbp_mean"),
@@ -213,7 +213,7 @@ rrt_window = rrt.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("dialysis_active").alias("rrt_count")
 )
 
@@ -231,7 +231,7 @@ vent_window = ventilation.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("ventilation_active").alias("vent_count")
 )
 
@@ -249,7 +249,7 @@ vaso_window = vasoactive.join(
     how="inner"
 ).filter(
     pl.col("starttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("vasoactive_agent").alias("vaso_count")
 )
 
@@ -282,7 +282,7 @@ lactate_lab = labevents.filter(
 ).filter(
     (pl.col("charttime") >= (pl.col("time_zero") - pl.duration(hours=24))) &
     (pl.col("charttime") <= pl.col("time_zero"))
-).group_by("hadm_id").agg(
+).groupby("hadm_id").agg(
     pl.col("valuenum").mean().alias("lactate_lab")
 )
 
@@ -472,7 +472,7 @@ if albumin_items.shape[0] > 0:
     ).filter(
         (pl.col("starttime") >= pl.col("time_zero")) &
         (pl.col("starttime") <= (pl.col("time_zero") + pl.duration(hours=24)))
-    ).group_by("stay_id").agg(
+    ).groupby("stay_id").agg(
         pl.first("starttime").alias("albumin_time")
     )
     
@@ -495,7 +495,7 @@ if albumin_items.shape[0] > 0:
         how="inner"
     ).filter(
         pl.col("starttime") > (pl.col("time_zero") + pl.duration(hours=24))
-    ).group_by("stay_id").agg(
+    ).groupby("stay_id").agg(
         pl.lit(1).alias("late_albumin")
     )
     
@@ -597,7 +597,7 @@ for key, value in cohort_counts.items():
     print(f"{key:.<40} {value:>10,}")
 
 print("\n" + "="*70)
-print="ИТОГОВАЯ СТАТИСТИКА")
+print("ИТОГОВАЯ СТАТИСТИКА")
 print("="*70)
 print(f"Всего пациентов: {cohort_pd.shape[0]}")
 print(f"Лечение (альбумин): {cohort_pd['treatment'].sum()} ({100*cohort_pd['treatment'].mean():.1f}%)")
@@ -605,7 +605,7 @@ print(f"Контроль: {(cohort_pd['treatment'] == 0).sum()}")
 print(f"28-day mortality: {cohort_pd['mortality_28days'].sum()} ({100*cohort_pd['mortality_28days'].mean():.1f}%)")
 
 print("\n" + "="*70)
-print="КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ВНЕСЕНЫ:")
+print("КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ВНЕСЕНЫ:")
 print("="*70)
 print("✓ Time zero = first crystalloid (НЕ ICU intime)")
 print("✓ Albumin в окне [time_zero, time_zero + 24h]")
