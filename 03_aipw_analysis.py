@@ -107,7 +107,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X_trimmed)):
     treated_train = t_train == 1
     control_train = t_train == 0
     
-        if treated_train.sum() > 10 and control_train.sum() > 10:
+    if treated_train.sum() > 10 and control_train.sum() > 10:
         outcome_t_fold = RandomizedSearchCV(
             estimator=GradientBoostingRegressor(random_state=42),
             param_distributions=outcome_param_dist,
