@@ -256,6 +256,27 @@ trim_mask = (propensity_scores >= 0.1) & (propensity_scores <= 0.9)
 trimmed_cohort = cohort[trim_mask].copy()
 print(f"\nПосле trimming по [0.1, 0.9]: {trimmed_cohort.shape[0]} пациентов (удалено {(~trim_mask).sum()})")
 
+n_outside_overlap = n_outside
+pct_outside_overlap = pct_outside
+mean_ps_treated = propensity_scores[treatment == 1].mean()
+mean_ps_control = propensity_scores[treatment == 0].mean()
+
+overlap_df = pd.DataFrame([{
+    "n_total": len(propensity_scores),
+    "n_inside_overlap": int(n_inside),
+    "n_outside_overlap": int(n_outside),
+    "pct_outside": 100 * n_outside / len(propensity_scores),
+    "mean_ps_treated": mean_ps_treated,
+    "mean_ps_control": mean_ps_control,
+    "trimming_lower": 0.1,
+    "trimming_upper": 0.9,
+}])
+
+overlap_df.to_csv(DATA_DIR / "overlap_summary.csv", index=False)
+print(f"Сохранено: {DATA_DIR / 'overlap_summary.csv'}")
+
+if pct_outside > 40:
+    print(f"\nWARNING: {pct_outside:.1f}% пациентов вне overlap region [0.1, 0.9] - serious limitation")
 
 # Шаг 4: Calibration plot (дополнительно)
 
@@ -315,11 +336,17 @@ print(f"\n=== Matching Statistics ===")
 print(f"Matched когорта: {matched_cohort.shape[0]} пациентов")
 print(f"Treated: {(matched_cohort['treatment'] == 1).sum()}")
 print(f"Control: {(matched_cohort['treatment'] == 0).sum()}")
+n_controls_with_replacement = len(matched_control_indices) - len(np.unique(matched_control_indices))
+matching_type = "WITH replacement" if n_controls_with_replacement > 0 else "WITHOUT replacement"
+
 print(f"Matched pairs: {valid_matches.sum()}")
 print(f"Уникальных control: {len(np.unique(matched_control_indices))}")
-print(f"Control с повторами: {len(matched_control_indices) - len(np.unique(matched_control_indices))}")
+print(f"Control с повторами: {n_controls_with_replacement}")
 print(f"Treated выкинуто (вне калипера): {(~valid_matches).sum()}")
-print(f"Matching: WITHOUT replacement (по умолчанию)")
+print(f"Matching: {matching_type} (ATT-style: treated к controls)")
+
+if n_controls_with_replacement > 0:
+    print(f"WARNING: {n_controls_with_replacement} control patients используются повторно")
 
 
 # Шаг 6: Баланс ковариат (SMD до/после matching)
@@ -380,6 +407,9 @@ n_imbalanced = (balance_df["abs_smd_after"] > 0.1).sum()
 n_total = len(balance_df)
 print(f"\nКовариат с |SMD| > 0.1: {n_imbalanced} из {n_total} ({100*n_imbalanced/n_total:.1f}%)")
 print(f"Ковариат с |SMD| < 0.1: {n_total - n_imbalanced} из {n_total} ({100*(n_total-n_imbalanced)/n_total:.1f}%)")
+
+balance_df.to_csv(DATA_DIR / "balance_smd.csv", index=False)
+print(f"Сохранено: {DATA_DIR / 'balance_smd.csv'}")
 
 # Love plot
 plt.figure(figsize=(10, 8))
@@ -606,14 +636,36 @@ results = {
     "n_covariates": len(available_confounders),
     "n_imbalanced": n_imbalanced,
     "ess": ess,
-    "n_trimmed": (trim_mask).sum(),
+    "n_trimmed": int((trim_mask).sum()),
     "n_matched": matched_cohort.shape[0],
 }
 
 with open(DATA_DIR / "ps_matching_results.pkl", "wb") as f:
     pickle.dump(results, f)
-
 print(f"Результаты сохранены: {DATA_DIR / 'ps_matching_results.pkl'}")
+
+propensity_model_info = {
+    "model": propensity_model,
+    "scores": propensity_scores,
+    "auc": logreg_auc,
+    "trimming": (0.1, 0.9),
+}
+with open(DATA_DIR / "propensity_model.pkl", "wb") as f:
+    pickle.dump(propensity_model_info, f)
+print(f"Propensity model сохранена: {DATA_DIR / 'propensity_model.pkl'}")
+
+matching_summary_df = pd.DataFrame([{
+    "n_pairs": int(valid_matches.sum()),
+    "n_unique_controls": len(np.unique(matched_control_indices)),
+    "n_controls_with_replacement": n_controls_with_replacement,
+    "caliper": caliper,
+    "matching_type": matching_type,
+    "n_treated_matched": int((matched_cohort["treatment"] == 1).sum()),
+    "n_control_matched": int((matched_cohort["treatment"] == 0).sum()),
+    "n_treated_excluded": int((~valid_matches).sum()),
+}])
+matching_summary_df.to_csv(DATA_DIR / "matching_summary.csv", index=False)
+print(f"Сохранено: {DATA_DIR / 'matching_summary.csv'}")
 
 
 # ИТОГОВАЯ ТАБЛИЦА

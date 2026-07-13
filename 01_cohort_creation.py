@@ -51,7 +51,7 @@ base_population = base_population.filter(pl.col("los_icu_hours") >= 24)
 cohort_counts["los_ge_24h"] = base_population.shape[0]
 print(f"После фильтра LOS >= 24ч: {cohort_counts['los_ge_24h']}")
 
-base_population = base_population.sort(["subject_id", "intime"]).groupby("subject_id").first()
+base_population = base_population.sort(["subject_id", "intime"]).group_by("subject_id").first()
 cohort_counts["first_stay"] = base_population.shape[0]
 print(f"Первый ICU stay: {cohort_counts['first_stay']}")
 
@@ -74,14 +74,14 @@ crystalloids_first = (
     input_events.filter(pl.col("itemid").is_in(crystalloids_itemids))
     .join(base_population.select(["stay_id", "intime"]), on="stay_id", how="inner")
     .sort(["stay_id", "starttime"])
-    .groupby("stay_id")
+    .group_by("stay_id")
     .first()
     .select(["stay_id", "starttime", "intime"])
     .rename({"starttime": "time_zero"})
 )
 
 crystalloids_first = crystalloids_first.with_columns(
-    ((pl.col("time_zero") - pl.col("intime")).dt.hours()).alias("hours_from_icu")
+    ((pl.col("time_zero") - pl.col("intime")).dt.total_hours()).alias("hours_from_icu")
 )
 
 crystalloids_first = crystalloids_first.filter(
@@ -136,7 +136,7 @@ vitalsign_window = vitalsign.join(
     (pl.col("charttime") <= pl.col("time_zero"))
 )
 
-vitalsign_agg = vitalsign_window.groupby("stay_id").agg(
+vitalsign_agg = vitalsign_window.group_by("stay_id").agg(
     pl.col("heart_rate").mean().alias("hr_mean"),
     pl.col("spo2").mean().alias("spo2_mean"),
     pl.col("mbp").mean().alias("mbp_mean"),
@@ -158,7 +158,7 @@ rrt_window = rrt.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).groupby("stay_id").agg(
+).group_by("stay_id").agg(
     pl.count("dialysis_active").alias("rrt_count")
 )
 
@@ -176,7 +176,7 @@ vent_window = ventilation.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).groupby("stay_id").agg(
+).group_by("stay_id").agg(
     pl.count("ventilation_active").alias("vent_count")
 )
 
@@ -194,7 +194,7 @@ vaso_window = vasoactive.join(
     how="inner"
 ).filter(
     pl.col("starttime") <= pl.col("time_zero")
-).groupby("stay_id").agg(
+).group_by("stay_id").agg(
     pl.count("vasoactive_agent").alias("vaso_count")
 )
 
@@ -226,7 +226,7 @@ lactate_lab = labevents.filter(
 ).filter(
     (pl.col("charttime") >= (pl.col("time_zero") - pl.duration(hours=24))) &
     (pl.col("charttime") <= pl.col("time_zero"))
-).groupby("hadm_id").agg(
+).group_by("hadm_id").agg(
     pl.col("valuenum").mean().alias("lactate_lab")
 )
 
@@ -412,7 +412,7 @@ if albumin_items.shape[0] > 0:
     ).filter(
         (pl.col("starttime") >= pl.col("time_zero")) &
         (pl.col("starttime") <= (pl.col("time_zero") + pl.duration(hours=24)))
-    ).groupby("stay_id").agg(
+    ).group_by("stay_id").agg(
         pl.first("starttime").alias("albumin_time")
     )
     
@@ -435,7 +435,7 @@ if albumin_items.shape[0] > 0:
         how="inner"
     ).filter(
         pl.col("starttime") > (pl.col("time_zero") + pl.duration(hours=24))
-    ).groupby("stay_id").agg(
+    ).group_by("stay_id").agg(
         pl.lit(1).alias("late_albumin")
     )
     
@@ -468,12 +468,25 @@ print("\n" + "="*70)
 print("="*70)
 
 # 28-day mortality от time_zero
+# Используем dod (date of death) если доступен, иначе deathtime
+patients_with_dod = patients.select(["subject_id", "dod"])
+sepsis_pop = sepsis_pop.join(patients_with_dod, on="subject_id", how="left")
+
 sepsis_pop = sepsis_pop.with_columns(
-    (
-        (pl.col("deathtime").is_not_null()) &
-        (pl.col("deathtime") <= (pl.col("time_zero") + pl.duration(days=28)))
-    ).cast(pl.Int32).alias("mortality_28days")
+    pl.when(pl.col("dod").is_not_null())
+    .then((pl.col("dod") <= (pl.col("time_zero") + pl.duration(days=28))).cast(pl.Int32))
+    .when(pl.col("deathtime").is_not_null())
+    .then((pl.col("deathtime") <= (pl.col("time_zero") + pl.duration(days=28))).cast(pl.Int32))
+    .otherwise(0)
+    .alias("mortality_28days")
 )
+
+n_dod_only = sepsis_pop.filter(
+    (pl.col("dod").is_not_null()) & (pl.col("deathtime").is_null())
+).shape[0]
+
+if n_dod_only > 0:
+    print(f"WARNING: {n_dod_only} пациентов имеют только dod (не deathtime) - используем dod")
 
 n_mortality = sepsis_pop.filter(pl.col('mortality_28days') == 1).shape[0]
 cohort_counts["known_outcome"] = sepsis_pop.shape[0]
@@ -486,12 +499,11 @@ print("="*70)
 confounder_cols = [
     "stay_id", "subject_id", "hadm_id",
     "treatment", "mortality_28days", "sepsis", "septic_shock",
-    "admission_age", "Female", "Male", "White", "Black", "Hispanic",
+    "admission_age", "Female", "White", "Black", "Hispanic",
     "emergency_admission", "insurance_Medicare", "insurance_Medicaid",
-    "lactate_final", "lactate_missing",  # добавили missing indicator
+    "lactate_final", "lactate_missing",
     "hr_mean", "spo2_mean", "mbp_mean", "temp_mean", "resp_mean",
     "has_carbapenems", "has_aminoglycosides", "has_beta_lactams", "has_glycopeptides",
-    # "has_vasopressors",  # УБРАЛИ - это part of sepsis definition
     "rrt_flag", "ventilation_flag",
     "charlson_comorbidity_index",
 ]
@@ -527,6 +539,11 @@ cohort_final.write_parquet(OUTPUT_DIR / "cohort_sepsis.parquet")
 cohort_counts["final_cohort"] = cohort_pd.shape[0]
 print(f"\nКогорта сохранена: {OUTPUT_DIR / 'cohort_sepsis.csv'}")
 print(f"Финальный размер: {cohort_counts['final_cohort']}")
+
+import json
+with open(OUTPUT_DIR / "cohort_counts.json", "w") as f:
+    json.dump(cohort_counts, f, indent=2)
+print(f"cohort_counts сохранен: {OUTPUT_DIR / 'cohort_counts.json'}")
 
 print("\n" + "="*70)
 print("COHORT COUNTS - полная цепочка")
