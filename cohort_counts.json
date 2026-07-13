@@ -1,0 +1,14 @@
+{
+  "all_icu_stays": 94458,
+  "adults_age_ge_18": 94458,
+  "los_ge_24h": 74829,
+  "first_stay": 54551,
+  "crystalloids_in_24h": 43354,
+  "with_time_zero": 43354,
+  "with_demographics": 43354,
+  "sepsis_proxy": 27977,
+  "exclude_late_albumin": 4936,
+  "with_treatment": 23041,
+  "known_outcome": 23041,
+  "final_cohort": 23041
+}
