@@ -109,6 +109,11 @@ print(f"\nПосле trimming [0.1, 0.9]: {X_trimmed.shape[0]} пациенто�
 np.save(DATA_DIR / "oof_propensity_scores.npy", e_x_oof)
 print(f"OOF propensity scores сохранены: {DATA_DIR / 'oof_propensity_scores.npy'}")
 
+# Compute propensity AUC for reporting
+from sklearn.metrics import roc_auc_score
+propensity_auc = roc_auc_score(treatment, e_x_oof)
+print(f"Propensity AUC-ROC (OOF): {propensity_auc:.4f}")
+
 
 # ## Шаг 3: Outcome models с 5-fold cross-fitting
 # Cross-fitting предотвращает overfitting predictions
@@ -397,7 +402,7 @@ results = {
     "ci_ipw": matching_results.get("ci_ipw"),
     "ate_matching": matching_results.get("ate_matching"),
     "ci_matching": matching_results.get("ci_matching"),
-    "propensity_auc": propensity_info["auc"],
+    "propensity_auc": propensity_auc,
     "n_covariates": len(available_confounders),
     "n_trimmed": len(X_trimmed),
 }
