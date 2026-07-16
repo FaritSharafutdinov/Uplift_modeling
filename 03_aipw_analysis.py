@@ -45,34 +45,69 @@ treatment = cohort["treatment"].values
 outcome = cohort["mortality_28days"].values
 
 
-# ## Шаг 2: Загрузка propensity model из 02_propensity_matching.py
-# Единый propensity/trimming setup - загружаем готовую модель
+# ## Шаг 2: Propensity model с 5-fold cross-fitting
+# N nuisance models (propensity AND outcome) должны train на train-fold only и predict held-out fold
 
-propensity_model_path = DATA_DIR / "propensity_model.pkl"
+from sklearn.model_selection import KFold
 
-if propensity_model_path.exists():
-    with open(propensity_model_path, "rb") as f:
-        propensity_info = pickle.load(f)
-    propensity_model = propensity_info["model"]
-    propensity_scores = propensity_info["scores"]
-    print(f"Propensity model загружена из {propensity_model_path}")
-    print(f"Propensity AUC-ROC: {propensity_info['auc']:.4f}")
-else:
-    raise FileNotFoundError(
-        f"Propensity model не найдена в {propensity_model_path}. "
-        "Запустите 02_propensity_matching.py для создания модели."
+print("\n" + "="*70)
+print("ШАГ 2: Propensity score с 5-fold cross-fitting")
+print("="*70)
+
+n_folds = 5
+kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+# Initialize array for OOF propensity scores
+e_x_oof = np.zeros(len(X))
+
+propensity_param_dist = {
+    "n_estimators": [50, 100, 200],
+    "max_depth": [3, 5, 7],
+    "learning_rate": [0.01, 0.05, 0.1],
+    "min_samples_split": [5, 10],
+    "min_samples_leaf": [2, 4],
+}
+
+print(f"\n5-fold cross-fitting для propensity model...")
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+    X_train, X_val = X[train_idx], X[val_idx]
+    t_train, t_val = treatment[train_idx], treatment[val_idx]
+    
+    # Train propensity model on fold
+    propensity_fold = RandomizedSearchCV(
+        estimator=GradientBoostingClassifier(random_state=42),
+        param_distributions=propensity_param_dist,
+        n_iter=15,
+        cv=3,
+        scoring="roc_auc",
+        n_jobs=-1,
+        random_state=42,
     )
+    propensity_fold.fit(X_train, t_train)
+    
+    # Predict on held-out fold
+    e_x_oof[val_idx] = propensity_fold.predict_proba(X_val)[:, 1]
+    
+    print(f"  Fold {fold + 1}/{n_folds} completed")
 
-# Trimming unified [0.1, 0.9] как в 02_propensity_matching.py
+# Handle any zeros (folds with all treated or all control)
+e_x_oof = np.clip(e_x_oof, 0.01, 0.99)
+
+# Trimming unified [0.1, 0.9]
 ps_lower, ps_upper = 0.1, 0.9
-trim_mask = (propensity_scores >= ps_lower) & (propensity_scores <= ps_upper)
+trim_mask = (e_x_oof >= ps_lower) & (e_x_oof <= ps_upper)
 
 X_trimmed = X[trim_mask]
 t_trimmed = treatment[trim_mask]
 y_trimmed = outcome[trim_mask]
-ps_trimmed = propensity_scores[trim_mask]
+ps_trimmed = e_x_oof[trim_mask]  # Use OOF predictions
 
-print(f"После trimming [0.1, 0.9]: {X_trimmed.shape[0]} пациентов")
+print(f"\nПосле trimming [0.1, 0.9]: {X_trimmed.shape[0]} пациентов")
+
+# Save OOF predictions for audit
+np.save(DATA_DIR / "oof_propensity_scores.npy", e_x_oof)
+print(f"OOF propensity scores сохранены: {DATA_DIR / 'oof_propensity_scores.npy'}")
 
 
 # ## Шаг 3: Outcome models с 5-fold cross-fitting
@@ -182,58 +217,114 @@ print(f"Значимо: {'Да' if (ci_lower > 0 or ci_upper < 0) else 'Нет'}
 # Bootstrap должен переобучать модели на каждой итерации (не использовать готовые predictions)
 
 
-def bootstrap_aipw_refit(X, t, y, ps, outcome_param_dist, n_bootstrap=500, random_state=42):
+def bootstrap_aipw_full_pipeline(X, t, y, outcome_param_dist, n_bootstrap=500, random_state=42):
     """
-    Bootstrap для AIPW с переобучением outcome models.
-    На каждой bootstrap итерации модели обучаются заново.
+    Full pipeline bootstrap for AIPW:
+    1. Resample patients
+    2. Retrain propensity model (with cross-fitting)
+    3. Re-trim
+    4. Retrain outcome models (with cross-fitting)
+    5. Estimate ATE
     """
+    from sklearn.model_selection import KFold
+    
     np.random.seed(random_state)
     n = len(t)
     ate_samples = []
+    n_folds = 5
     
     for i in range(n_bootstrap):
+        # Step 1: Resample
         idx = np.random.choice(n, size=n, replace=True)
         X_boot = X[idx]
         t_boot = t[idx]
         y_boot = y[idx]
-        ps_boot = ps[idx]
         
-        treated_mask_boot = t_boot == 1
-        control_mask_boot = t_boot == 0
+        # Step 2: Retrain propensity model with cross-fitting
+        kf_boot = KFold(n_splits=n_folds, shuffle=True, random_state=i)
+        e_x_oof_boot = np.zeros(len(X_boot))
         
-        if treated_mask_boot.sum() < 10 or control_mask_boot.sum() < 10:
+        propensity_param_dist = {
+            "n_estimators": [50, 100, 200],
+            "max_depth": [3, 5, 7],
+            "learning_rate": [0.01, 0.05, 0.1],
+            "min_samples_split": [5, 10],
+            "min_samples_leaf": [2, 4],
+        }
+        
+        for train_idx, val_idx in kf_boot.split(X_boot):
+            X_train, X_val = X_boot[train_idx], X_boot[val_idx]
+            t_train, t_val = t_boot[train_idx], t_boot[val_idx]
+            
+            propensity_fold = RandomizedSearchCV(
+                estimator=GradientBoostingClassifier(random_state=42),
+                param_distributions=propensity_param_dist,
+                n_iter=10,
+                cv=3,
+                scoring="roc_auc",
+                n_jobs=-1,
+                random_state=42,
+            )
+            propensity_fold.fit(X_train, t_train)
+            e_x_oof_boot[val_idx] = propensity_fold.predict_proba(X_val)[:, 1]
+        
+        e_x_oof_boot = np.clip(e_x_oof_boot, 0.01, 0.99)
+        
+        # Step 3: Re-trim
+        trim_mask_boot = (e_x_oof_boot >= 0.1) & (e_x_oof_boot <= 0.9)
+        if trim_mask_boot.sum() < 100:
             continue
         
-        outcome_t_boot = RandomizedSearchCV(
-            estimator=GradientBoostingRegressor(random_state=42),
-            param_distributions=outcome_param_dist,
-            n_iter=15,
-            cv=3,
-            scoring="neg_mean_squared_error",
-            n_jobs=-1,
-            random_state=42,
-        )
-        outcome_c_boot = RandomizedSearchCV(
-            estimator=GradientBoostingRegressor(random_state=42),
-            param_distributions=outcome_param_dist,
-            n_iter=15,
-            cv=3,
-            scoring="neg_mean_squared_error",
-            n_jobs=-1,
-            random_state=42,
-        )
+        X_trimmed_boot = X_boot[trim_mask_boot]
+        t_trimmed_boot = t_boot[trim_mask_boot]
+        y_trimmed_boot = y_boot[trim_mask_boot]
+        ps_trimmed_boot = e_x_oof_boot[trim_mask_boot]
         
-        outcome_t_boot.fit(X_boot[treated_mask_boot], y_boot[treated_mask_boot])
-        outcome_c_boot.fit(X_boot[control_mask_boot], y_boot[control_mask_boot])
+        # Step 4: Retrain outcome models with cross-fitting
+        kf_outcome = KFold(n_splits=3, shuffle=True, random_state=i)
+        mu_1_boot = np.zeros(len(X_trimmed_boot))
+        mu_0_boot = np.zeros(len(X_trimmed_boot))
         
-        mu_1_boot = outcome_t_boot.predict(X_boot)
-        mu_0_boot = outcome_c_boot.predict(X_boot)
+        for train_idx, val_idx in kf_outcome.split(X_trimmed_boot):
+            X_train, X_val = X_trimmed_boot[train_idx], X_trimmed_boot[val_idx]
+            t_train, t_val = t_trimmed_boot[train_idx], t_trimmed_boot[val_idx]
+            y_train, y_val = y_trimmed_boot[train_idx], y_trimmed_boot[val_idx]
+            
+            treated_train = t_train == 1
+            control_train = t_train == 0
+            
+            if treated_train.sum() > 10 and control_train.sum() > 10:
+                outcome_t_fold = RandomizedSearchCV(
+                    estimator=GradientBoostingRegressor(random_state=42),
+                    param_distributions=outcome_param_dist,
+                    n_iter=10,
+                    cv=3,
+                    scoring="neg_mean_squared_error",
+                    n_jobs=-1,
+                    random_state=42,
+                )
+                outcome_c_fold = RandomizedSearchCV(
+                    estimator=GradientBoostingRegressor(random_state=42),
+                    param_distributions=outcome_param_dist,
+                    n_iter=10,
+                    cv=3,
+                    scoring="neg_mean_squared_error",
+                    n_jobs=-1,
+                    random_state=42,
+                )
+                
+                outcome_t_fold.fit(X_train[treated_train], y_train[treated_train])
+                outcome_c_fold.fit(X_train[control_train], y_train[control_train])
+                
+                mu_1_boot[val_idx] = outcome_t_fold.predict(X_val)
+                mu_0_boot[val_idx] = outcome_c_fold.predict(X_val)
         
-        ate, _ = compute_aipw_cf(t_boot, y_boot, ps_boot, mu_1_boot, mu_0_boot)
+        # Step 5: Estimate ATE
+        ate, _ = compute_aipw_cf(t_trimmed_boot, y_trimmed_boot, ps_trimmed_boot, mu_1_boot, mu_0_boot)
         ate_samples.append(ate)
         
         if (i + 1) % 100 == 0:
-            print(f"  Bootstrap {i + 1}/{n_bootstrap}")
+            print(f"  AIPW Bootstrap {i + 1}/{n_bootstrap}")
     
     ate_samples = np.array(ate_samples)
     ci_lower = np.percentile(ate_samples, 2.5)
@@ -242,11 +333,11 @@ def bootstrap_aipw_refit(X, t, y, ps, outcome_param_dist, n_bootstrap=500, rando
     return ate_samples.mean(), ci_lower, ci_upper, ate_samples
 
 
-print("Вычисляем bootstrap CI для AIPW (n=500, с переобучением)...")
-ate_aipw_boot, ci_aipw_lower, ci_aipw_upper, aipw_samples = bootstrap_aipw_refit(
-    X_trimmed, t_trimmed, y_trimmed, ps_trimmed,
+print("Вычисляем bootstrap CI для AIPW (n=100, с полным переобучением propensity + outcome)...")
+ate_aipw_boot, ci_aipw_lower, ci_aipw_upper, aipw_samples = bootstrap_aipw_full_pipeline(
+    X, treatment, outcome,
     outcome_param_dist,
-    n_bootstrap=500
+    n_bootstrap=100  # Reduced for faster runtime
 )
 
 print(f"\nAIPW ATE (bootstrap): {ate_aipw_boot:.4f}")
@@ -267,8 +358,11 @@ plt.legend()
 plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.savefig(DATA_DIR / "bootstrap_aipw.png", dpi=150)
-# plt.show()
 
+# Save OOF predictions for audit
+np.save(DATA_DIR / "oof_mu1_predictions.npy", mu_1_cv)
+np.save(DATA_DIR / "oof_mu0_predictions.npy", mu_0_cv)
+print(f"\nOOF predictions сохранены: {DATA_DIR / 'oof_mu*_predictions.npy'}")
 
 # ## Шаг 6: Сравнение всех методов
 

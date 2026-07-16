@@ -2,6 +2,7 @@
 import polars as pl
 import pandas as pd
 import numpy as np
+import json
 from pathlib import Path
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.ensemble import GradientBoostingClassifier
@@ -326,27 +327,76 @@ distances, indices = nn.kneighbors(treated_ps)
 valid_matches = distances[:, 0] <= caliper
 print(f"Valid matches (в пределах калипера): {valid_matches.sum()} из {len(treated_ps)}")
 
-matched_treated_indices = np.where(treated_mask_trimmed)[0][valid_matches]
-matched_control_indices = control_indices[indices[valid_matches, 0]]
+# Fix index mapping: map back to original cohort indices
+treated_indices_in_trimmed = np.where(treated_mask_trimmed)[0]
+control_indices_in_trimmed = np.where(control_mask_trimmed)[0]
 
-matched_indices = np.concatenate([matched_treated_indices, matched_control_indices])
+# Indices of matched treated and controls within their respective groups
+matched_treated_pos = np.where(valid_matches)[0]
+matched_control_pos = indices[valid_matches, 0]
+
+# Map to original cohort indices
+matched_treated_original_idx = treated_indices_in_trimmed[matched_treated_pos]
+matched_control_original_idx = control_indices_in_trimmed[matched_control_pos]
+
+# Get stay_ids for audit
+matched_treated_stay_id = cohort.loc[matched_treated_original_idx, "stay_id"].values
+matched_control_stay_id = cohort.loc[matched_control_original_idx, "stay_id"].values
+
+matched_indices = np.concatenate([matched_treated_original_idx, matched_control_original_idx])
 matched_cohort = cohort.loc[matched_indices].copy()
 
 print(f"\n=== Matching Statistics ===")
 print(f"Matched когорта: {matched_cohort.shape[0]} пациентов")
 print(f"Treated: {(matched_cohort['treatment'] == 1).sum()}")
 print(f"Control: {(matched_cohort['treatment'] == 0).sum()}")
-n_controls_with_replacement = len(matched_control_indices) - len(np.unique(matched_control_indices))
+n_controls_with_replacement = len(matched_control_original_idx) - len(np.unique(matched_control_original_idx))
 matching_type = "WITH replacement" if n_controls_with_replacement > 0 else "WITHOUT replacement"
 
 print(f"Matched pairs: {valid_matches.sum()}")
-print(f"Уникальных control: {len(np.unique(matched_control_indices))}")
+print(f"Уникальных control: {len(np.unique(matched_control_original_idx))}")
 print(f"Control с повторами: {n_controls_with_replacement}")
 print(f"Treated выкинуто (вне калипера): {(~valid_matches).sum()}")
 print(f"Matching: {matching_type} (ATT-style: treated к controls)")
 
 if n_controls_with_replacement > 0:
     print(f"WARNING: {n_controls_with_replacement} control patients используются повторно")
+
+# Assertion: unique controls <= treated
+assert len(np.unique(matched_control_original_idx)) <= len(matched_treated_original_idx), \
+    f"Error: {len(np.unique(matched_control_original_idx))} unique controls > {len(matched_treated_original_idx)} treated"
+
+# Create matching_audit table
+unique_controls, counts = np.unique(matched_control_original_idx, return_counts=True)
+n_repeated = len(counts[counts > 1])
+
+matching_audit = pd.DataFrame({
+    "matched_treated_stay_id": matched_treated_stay_id,
+    "matched_control_stay_id": matched_control_stay_id,
+    "treated_original_idx": matched_treated_original_idx,
+    "control_original_idx": matched_control_original_idx,
+})
+
+matching_audit["control_repeated_count"] = matching_audit["control_original_idx"].map(
+    dict(zip(unique_controls, counts))
+)
+
+matching_audit.to_csv(DATA_DIR / "matching_audit.csv", index=False)
+print(f"\nmatching_audit.csv сохранен: {DATA_DIR / 'matching_audit.csv'}")
+
+# Matching summary statistics
+matching_summary = {
+    "n_treated_matched": len(matched_treated_stay_id),
+    "n_unique_controls": len(unique_controls),
+    "n_repeated_controls": n_repeated,
+    "n_treated_unmatched": int((~valid_matches).sum()),
+    "caliper_used": caliper,
+    "replacement_mode": n_repeated > 0,
+}
+
+with open(DATA_DIR / "matching_summary.json", "w") as f:
+    json.dump(matching_summary, f, indent=2)
+print(f"matching_summary.json сохранен: {DATA_DIR / 'matching_summary.json'}")
 
 
 # Шаг 6: Баланс ковариат (SMD до/после matching)
@@ -555,29 +605,64 @@ print("\n" + "="*70)
 print("ШАГ 10: Bootstrap 95% CI")
 print("="*70)
 
-def bootstrap_ate(data, treatment_col, outcome_col, weights_col=None, n_bootstrap=500, random_state=42):
-    """Bootstrap для ATE и CI"""
+def bootstrap_ipw_full_pipeline(X, t, y, n_bootstrap=500, random_state=42):
+    """
+    Full pipeline bootstrap for IPW:
+    1. Resample patients
+    2. Retrain propensity model
+    3. Re-trim
+    4. Recalculate weights
+    5. Estimate ATE
+    """
     np.random.seed(random_state)
-    n = len(data)
+    n = len(t)
     ate_samples = []
     
     for i in range(n_bootstrap):
-        sample_idx = np.random.choice(n, size=n, replace=True)
-        sample = data.iloc[sample_idx]
+        # Step 1: Resample BEFORE any modeling
+        idx = np.random.choice(n, size=n, replace=True)
+        X_boot = X[idx]
+        t_boot = t[idx]
+        y_boot = y[idx]
         
-        if weights_col is not None:
-            treated = sample[sample[treatment_col] == 1]
-            control = sample[sample[treatment_col] == 0]
-            
-            weighted_treated = DescrStatsW(treated[outcome_col], weights=treated[weights_col], ddof=0)
-            weighted_control = DescrStatsW(control[outcome_col], weights=control[weights_col], ddof=0)
-            
-            ate = weighted_treated.mean - weighted_control.mean
-        else:
-            ate = sample[sample[treatment_col] == 1][outcome_col].mean() - \
-                  sample[sample[treatment_col] == 0][outcome_col].mean()
+        # Step 2: Retrain propensity model
+        propensity_boot = LogisticRegression(max_iter=1000, random_state=i)
+        propensity_boot.fit(X_boot, t_boot)
+        ps_boot = propensity_boot.predict_proba(X_boot)[:, 1]
         
+        # Step 3: Re-trim
+        trim_mask = (ps_boot >= 0.1) & (ps_boot <= 0.9)
+        if trim_mask.sum() < 100:
+            continue  # Skip if too few samples
+        
+        # Step 4: Recalculate IPW weights
+        ps_trimmed = ps_boot[trim_mask]
+        t_trimmed = t_boot[trim_mask]
+        y_trimmed = y_boot[trim_mask]
+        
+        sw = np.where(
+            t_trimmed == 1,
+            ps_trimmed.mean() / ps_trimmed,
+            (1 - ps_trimmed.mean()) / (1 - ps_trimmed)
+        )
+        sw_clipped = np.clip(sw, 0.1, 10.0)
+        
+        # Step 5: Estimate ATE
+        weighted_treated = DescrStatsW(
+            y_trimmed[t_trimmed == 1],
+            weights=sw_clipped[t_trimmed == 1],
+            ddof=0,
+        )
+        weighted_control = DescrStatsW(
+            y_trimmed[t_trimmed == 0],
+            weights=sw_clipped[t_trimmed == 0],
+            ddof=0,
+        )
+        ate = weighted_treated.mean - weighted_control.mean
         ate_samples.append(ate)
+        
+        if (i + 1) % 100 == 0:
+            print(f"  IPW Bootstrap {i + 1}/{n_bootstrap}")
     
     ate_samples = np.array(ate_samples)
     ci_lower = np.percentile(ate_samples, 2.5)
@@ -586,9 +671,72 @@ def bootstrap_ate(data, treatment_col, outcome_col, weights_col=None, n_bootstra
     return ate_samples.mean(), ci_lower, ci_upper, ate_samples
 
 
-print("Вычисляем bootstrap CI для IPW (n=500)...")
-ate_ipw_boot, ci_ipw_lower, ci_ipw_upper, ipw_samples = bootstrap_ate(
-    trimmed_cohort, "treatment", "mortality_28days", "ipw_weight", n_bootstrap=500
+def bootstrap_matching_full_pipeline(X, t, y, n_bootstrap=500, random_state=42):
+    """
+    Full matching bootstrap:
+    1. Resample patients
+    2. Retrain propensity model
+    3. Re-match (with replacement)
+    4. Estimate ATE
+    """
+    from sklearn.neighbors import NearestNeighbors
+    
+    np.random.seed(random_state)
+    n = len(t)
+    ate_samples = []
+    
+    for i in range(n_bootstrap):
+        # Step 1: Resample
+        idx = np.random.choice(n, size=n, replace=True)
+        X_boot = X[idx]
+        t_boot = t[idx]
+        y_boot = y[idx]
+        
+        # Step 2: Retrain propensity
+        propensity_boot = LogisticRegression(max_iter=1000, random_state=i)
+        propensity_boot.fit(X_boot, t_boot)
+        ps_boot = propensity_boot.predict_proba(X_boot)[:, 1]
+        
+        # Step 3: Re-match
+        treated_mask = t_boot == 1
+        control_mask = t_boot == 0
+        
+        if treated_mask.sum() < 10 or control_mask.sum() < 10:
+            continue
+        
+        treated_ps = ps_boot[treated_mask].reshape(-1, 1)
+        control_ps = ps_boot[control_mask].reshape(-1, 1)
+        
+        nn = NearestNeighbors(n_neighbors=1, metric="euclidean")
+        nn.fit(control_ps)
+        distances, indices = nn.kneighbors(treated_ps)
+        
+        caliper = 0.2 * ps_boot.std()
+        valid_matches = distances[:, 0] <= caliper
+        
+        if valid_matches.sum() < 10:
+            continue
+        
+        matched_treated_y = y_boot[treated_mask][valid_matches]
+        matched_control_y = y_boot[control_mask][indices[valid_matches, 0]]
+        
+        # Step 4: Estimate ATE
+        ate = matched_treated_y.mean() - matched_control_y.mean()
+        ate_samples.append(ate)
+        
+        if (i + 1) % 100 == 0:
+            print(f"  Matching Bootstrap {i + 1}/{n_bootstrap}")
+    
+    ate_samples = np.array(ate_samples)
+    ci_lower = np.percentile(ate_samples, 2.5)
+    ci_upper = np.percentile(ate_samples, 97.5)
+    
+    return ate_samples.mean(), ci_lower, ci_upper, ate_samples
+
+
+print("Вычисляем bootstrap CI для IPW (n=500, с переобучением propensity)...")
+ate_ipw_boot, ci_ipw_lower, ci_ipw_upper, ipw_samples = bootstrap_ipw_full_pipeline(
+    X, treatment, outcome, n_bootstrap=500
 )
 
 print(f"\nIPW ATE: {ate_ipw_boot:.4f}")
@@ -596,9 +744,9 @@ print(f"95% CI: [{ci_ipw_lower:.4f}, {ci_ipw_upper:.4f}]")
 print(f"Значимо: {'Да' if (ci_ipw_lower > 0 or ci_ipw_upper < 0) else 'Нет'}")
 
 
-print("\nВычисляем bootstrap CI для Matching (n=500)...")
-ate_match_boot, ci_match_lower, ci_match_upper, match_samples = bootstrap_ate(
-    matched_cohort, "treatment", "mortality_28days", None, n_bootstrap=500
+print("\nВычисляем bootstrap CI для Matching (n=500, с переобучением propensity)...")
+ate_match_boot, ci_match_lower, ci_match_upper, match_samples = bootstrap_matching_full_pipeline(
+    X, treatment, outcome, n_bootstrap=500
 )
 
 print(f"\nMatching ATE: {ate_match_boot:.4f}")
@@ -656,8 +804,9 @@ print(f"Propensity model сохранена: {DATA_DIR / 'propensity_model.pkl'}
 
 matching_summary_df = pd.DataFrame([{
     "n_pairs": int(valid_matches.sum()),
-    "n_unique_controls": len(np.unique(matched_control_indices)),
+    "n_unique_controls": len(np.unique(matched_control_original_idx)),
     "n_controls_with_replacement": n_controls_with_replacement,
+    "n_repeated_controls": n_repeated,
     "caliper": caliper,
     "matching_type": matching_type,
     "n_treated_matched": int((matched_cohort["treatment"] == 1).sum()),

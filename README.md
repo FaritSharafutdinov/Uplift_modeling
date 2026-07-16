@@ -18,6 +18,27 @@
 - **Exclusion**: Альбумин > 24ч после time zero (late albumin)
 - **Confounding adjustment**: Propensity score matching, IPW, AIPW
 
+### Known Biases & Limitations
+
+1. **Immortal Time Bias:**
+   - Time zero = first crystalloid
+   - Patients must survive to receive crystalloids
+   - This excludes patients who die before crystalloid administration
+
+2. **Selection Bias (LOS Filter):**
+   - LOS ≥24h is known only after ICU discharge
+   - Patients who die <24h are excluded
+   - This may bias toward healthier patients
+
+3. **Confounding by Indication:**
+   - Sicker patients more likely to receive albumin
+   - Adjusted via 22 confounders + IPW/AIPW
+   - Residual confounding possible
+
+4. **Overlap Violations:**
+   - ~45% of patients outside [0.1, 0.9] propensity range
+   - Results generalizable only to overlap population
+
 ---
 
 ## Оригинальная статья
@@ -47,19 +68,77 @@
 ```
 notebook_new/
 ├── requirements.txt            # Зависимости Python
+├── config.yaml                 # Конфигурация
+├── run_pipeline.sh             # Script для запуска
+├── Makefile                    # Make команды
 ├── 01_cohort_creation.py       # Создание когорты
 ├── 02_propensity_matching.py   # Propensity score matching + IPW
 ├── 03_aipw_analysis.py         # Doubly Robust (AIPW) анализ
 ├── 04_cate_analysis.py         # CATE (heterogeneous effects)
-└── 05_summary_results.py       # Сводка результатов
+├── 05_summary_results.py       # Сводка результатов
+└── 06_generate_report.py       # Авто-генерация отчета
 ```
 
-## Запуск
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Configure paths
+
+Edit `config.yaml`:
+```yaml
+MIMIC_DIR: "/path/to/your/mimic-iv-3.1/mimiciv_as_parquet"
+OUTPUT_DIR: "/path/to/your/output/directory"
+```
+
+### 3. Run full pipeline
+
+```bash
+# Option A: Using shell script
+bash run_pipeline.sh
+
+# Option B: Using Makefile
+make all
+
+# Option C: Manual step-by-step
+python 01_cohort_creation.py
+python 02_propensity_matching.py
+python 03_aipw_analysis.py
+python 04_cate_analysis.py
+python 05_summary_results.py
+python 06_generate_report.py
+```
+
+### 4. View results
+
+```bash
+# Open final report
+open FINAL_REPORT.md
+
+# View ATE results
+cat ate_results.csv
+
+# View cohort counts
+cat cohort_audit.csv
+```
+
+### 5. Reproducibility
+
+All random seeds are fixed in `config.yaml`. For exact reproduction:
+```bash
+export PYTHONHASHSEED=42
+python 01_cohort_creation.py
+# ... rest of pipeline
+```
 
 ### Требования
 
 ```bash
-pip install polars pandas scikit-learn scipy matplotlib seaborn statsmodels joblib
+pip install -r requirements.txt
 ```
 
 ### Порядок выполнения

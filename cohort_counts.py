@@ -18,7 +18,16 @@ print("="*70)
 print("COHORT AUDIT - генерация cohort_audit.csv")
 print("="*70)
 
-audit_rows = []
+# Check if cohort_audit.csv already exists from 01_cohort_creation.py
+audit_csv_path = DATA_DIR / "cohort_audit.csv"
+if audit_csv_path.exists():
+    print(f"cohort_audit.csv уже существует, используем данные из 01_cohort_creation.py")
+    audit_df_existing = pd.read_csv(audit_csv_path)
+    print(f"Загружено {len(audit_df_existing)} шагов аудита")
+    audit_rows = audit_df_existing.to_dict('records')
+else:
+    print("cohort_audit.csv не найден, генерируем из cohort_counts.json")
+    audit_rows = []
 
 n_final = cohort_counts.get("final_cohort", len(cohort))
 n_treatment = cohort["treatment"].sum()
@@ -49,27 +58,40 @@ steps = [
     ("final_cohort", cohort_counts.get("final_cohort")),
 ]
 
-for step_name, n_rows in steps:
-    if n_rows is None:
-        continue
-    
-    audit_rows.append({
-        "step_name": step_name,
-        "n_rows": n_rows,
-        "n_unique_stay_id": n_rows if step_name in ["all_icu_stays", "first_stay", "crystalloids_in_24h", "with_time_zero", "sepsis_proxy", "with_treatment"] else None,
-        "n_unique_hadm_id": None,
-        "n_unique_subject_id": None,
-        "n_treatment": n_treatment if step_name == "final_cohort" else None,
-        "n_control": n_control if step_name == "final_cohort" else None,
-        "n_late_albumin": n_late_albumin if step_name in ["exclude_late_albumin", "final_cohort"] else None,
-        "n_missing_lactate": n_missing_lactate if step_name == "final_cohort" else None,
-        "pct_missing_per_column": pct_missing_str if step_name == "final_cohort" else None,
-    })
+# Only generate from scratch if not already created
+if not audit_rows:
+    for step_name, n_rows in steps:
+        if n_rows is None:
+            continue
+        
+        audit_rows.append({
+            "step_name": step_name,
+            "n_rows": n_rows,
+            "n_unique_stay_id": n_rows if step_name in ["all_icu_stays", "first_stay", "crystalloids_in_24h", "with_time_zero", "sepsis_proxy", "with_treatment"] else None,
+            "n_unique_hadm_id": None,
+            "n_unique_subject_id": None,
+            "n_treatment": n_treatment if step_name == "final_cohort" else None,
+            "n_control": n_control if step_name == "final_cohort" else None,
+            "n_late_albumin": n_late_albumin if step_name in ["exclude_late_albumin", "final_cohort"] else None,
+            "n_missing_lactate": n_missing_lactate if step_name == "final_cohort" else None,
+            "pct_missing_per_column": pct_missing_str if step_name == "final_cohort" else None,
+        })
 
-audit_df = pd.DataFrame(audit_rows)
-audit_df.to_csv(DATA_DIR / "cohort_audit.csv", index=False)
-print(f"\ncohort_audit.csv сохранен: {DATA_DIR / 'cohort_audit.csv'}")
-print(audit_df.to_string(index=False))
+    audit_df = pd.DataFrame(audit_rows)
+    audit_df.to_csv(DATA_DIR / "cohort_audit.csv", index=False)
+    print(f"\ncohort_audit.csv сохранен: {DATA_DIR / 'cohort_audit.csv'}")
+    print(audit_df.to_string(index=False))
+else:
+    # Add final cohort stats to existing audit
+    audit_df = pd.DataFrame(audit_rows)
+    audit_df["n_treatment"] = audit_df.apply(lambda row: n_treatment if row["step_name"] == "final_cohort" else None, axis=1)
+    audit_df["n_control"] = audit_df.apply(lambda row: n_control if row["step_name"] == "final_cohort" else None, axis=1)
+    audit_df["n_late_albumin"] = audit_df.apply(lambda row: n_late_albumin if row["step_name"] in ["exclude_late_albumin", "final_cohort"] else None, axis=1)
+    audit_df["n_missing_lactate"] = audit_df.apply(lambda row: n_missing_lactate if row["step_name"] == "final_cohort" else None, axis=1)
+    audit_df["pct_missing_per_column"] = audit_df.apply(lambda row: pct_missing_str if row["step_name"] == "final_cohort" else None, axis=1)
+    audit_df.to_csv(DATA_DIR / "cohort_audit.csv", index=False)
+    print(f"\ncohort_audit.csv обновлен: {DATA_DIR / 'cohort_audit.csv'}")
+    print(audit_df.to_string(index=False))
 
 print("\n" + "="*70)
 print("COHORT COUNTS - Таблица для отчета")

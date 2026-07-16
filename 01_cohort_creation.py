@@ -16,6 +16,17 @@ MIMIC_DERIVED = MIMIC_DIR / "mimiciv_derived"
 pd.set_option("display.max_columns", None)
 
 cohort_counts = {}
+cohort_audit = []
+
+def add_audit_point(step_name, df):
+    """Add audit point with real unique counts"""
+    cohort_audit.append({
+        "step_name": step_name,
+        "n_rows": df.shape[0],
+        "n_unique_stay_id": df["stay_id"].n_unique(),
+        "n_unique_hadm_id": df["hadm_id"].n_unique() if "hadm_id" in df.columns else None,
+        "n_unique_subject_id": df["subject_id"].n_unique() if "subject_id" in df.columns else None,
+    })
 
 print("="*70)
 print("="*70)
@@ -23,6 +34,7 @@ print("="*70)
 # Загружаем icustays
 icustays = pl.read_parquet(MIMIC_ICU / "icustays")
 cohort_counts["all_icu_stays"] = icustays.shape[0]
+add_audit_point("all_icu_stays", icustays)
 print(f"Всего ICU stays: {cohort_counts['all_icu_stays']}")
 
 patients = pl.read_parquet(MIMIC_HOSP / "patients")
@@ -42,17 +54,23 @@ base_population = base_population.with_columns(
 
 base_population = base_population.filter(pl.col("admission_age") >= 18)
 cohort_counts["adults_age_ge_18"] = base_population.shape[0]
+add_audit_point("adults_age_ge_18", base_population)
 print(f"После фильтра возраст >= 18: {cohort_counts['adults_age_ge_18']}")
 
 base_population = base_population.with_columns(
     (pl.col("los") * 24).alias("los_icu_hours")
 )
+# WARNING: This uses future information (LOS known only after ICU discharge)
+# This introduces selection bias - patients who die early (<24h) are excluded
+# This may bias toward healthier patients who survive long enough to be discharged
 base_population = base_population.filter(pl.col("los_icu_hours") >= 24)
 cohort_counts["los_ge_24h"] = base_population.shape[0]
+add_audit_point("los_ge_24h", base_population)
 print(f"После фильтра LOS >= 24ч: {cohort_counts['los_ge_24h']}")
 
-base_population = base_population.sort(["subject_id", "intime"]).group_by("subject_id").first()
+base_population = base_population.sort(["subject_id", "intime"]).groupby("subject_id").first()
 cohort_counts["first_stay"] = base_population.shape[0]
+add_audit_point("first_stay", base_population)
 print(f"Первый ICU stay: {cohort_counts['first_stay']}")
 
 base_population = base_population.with_columns(
@@ -74,14 +92,14 @@ crystalloids_first = (
     input_events.filter(pl.col("itemid").is_in(crystalloids_itemids))
     .join(base_population.select(["stay_id", "intime"]), on="stay_id", how="inner")
     .sort(["stay_id", "starttime"])
-    .group_by("stay_id")
+    .groupby("stay_id")
     .first()
     .select(["stay_id", "starttime", "intime"])
     .rename({"starttime": "time_zero"})
 )
 
 crystalloids_first = crystalloids_first.with_columns(
-    ((pl.col("time_zero") - pl.col("intime")).dt.total_hours()).alias("hours_from_icu")
+    ((pl.col("time_zero").cast(pl.Int64) - pl.col("intime").cast(pl.Int64)) / 3600000000).alias("hours_from_icu")
 )
 
 crystalloids_first = crystalloids_first.filter(
@@ -136,7 +154,7 @@ vitalsign_window = vitalsign.join(
     (pl.col("charttime") <= pl.col("time_zero"))
 )
 
-vitalsign_agg = vitalsign_window.group_by("stay_id").agg(
+vitalsign_agg = vitalsign_window.groupby("stay_id").agg(
     pl.col("heart_rate").mean().alias("hr_mean"),
     pl.col("spo2").mean().alias("spo2_mean"),
     pl.col("mbp").mean().alias("mbp_mean"),
@@ -158,7 +176,7 @@ rrt_window = rrt.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("dialysis_active").alias("rrt_count")
 )
 
@@ -176,7 +194,7 @@ vent_window = ventilation.join(
     how="inner"
 ).filter(
     pl.col("charttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("ventilation_active").alias("vent_count")
 )
 
@@ -194,7 +212,7 @@ vaso_window = vasoactive.join(
     how="inner"
 ).filter(
     pl.col("starttime") <= pl.col("time_zero")
-).group_by("stay_id").agg(
+).groupby("stay_id").agg(
     pl.count("vasoactive_agent").alias("vaso_count")
 )
 
@@ -226,7 +244,7 @@ lactate_lab = labevents.filter(
 ).filter(
     (pl.col("charttime") >= (pl.col("time_zero") - pl.duration(hours=24))) &
     (pl.col("charttime") <= pl.col("time_zero"))
-).group_by("hadm_id").agg(
+).groupby("hadm_id").agg(
     pl.col("valuenum").mean().alias("lactate_lab")
 )
 
@@ -348,12 +366,20 @@ print("="*70)
 
 suspicion = pl.read_parquet(MIMIC_DERIVED / "suspicion_of_infection")
 
-
+# Check for row multiplication after join
+n_before_join = base_population.shape[0]
 base_population = base_population.join(
     suspicion.select(["hadm_id", "suspected_infection_time"]),
     on="hadm_id",
     how="left"
 )
+n_after_join = base_population.shape[0]
+
+if n_after_join > n_before_join:
+    print(f"WARNING: suspicion join multiplied rows from {n_before_join} to {n_after_join}")
+    # Fix: take first suspicion per hadm_id
+    base_population = base_population.sort("suspected_infection_time").groupby("hadm_id").first()
+    print("Fixed: took first suspicion per hadm_id")
 
 
 
@@ -412,7 +438,7 @@ if albumin_items.shape[0] > 0:
     ).filter(
         (pl.col("starttime") >= pl.col("time_zero")) &
         (pl.col("starttime") <= (pl.col("time_zero") + pl.duration(hours=24)))
-    ).group_by("stay_id").agg(
+    ).groupby("stay_id").agg(
         pl.first("starttime").alias("albumin_time")
     )
     
@@ -435,7 +461,7 @@ if albumin_items.shape[0] > 0:
         how="inner"
     ).filter(
         pl.col("starttime") > (pl.col("time_zero") + pl.duration(hours=24))
-    ).group_by("stay_id").agg(
+    ).groupby("stay_id").agg(
         pl.lit(1).alias("late_albumin")
     )
     
@@ -520,11 +546,20 @@ confounder_vars = [col for col in available_cols if col not in id_cols + target_
 print(f"Конфаундеры ({len(confounder_vars)}): {confounder_vars}")
 
 X = cohort_pd[confounder_vars].copy()
-
+print(f"X shape: {X.shape}")
+print(f"Пропусков до импутации: {X.isnull().sum().sum()}")
 
 imputer = KNNImputer(n_neighbors=10)
 X_imputed = imputer.fit_transform(X)
-cohort_pd[confounder_vars] = X_imputed
+print(f"X_imputed shape: {X_imputed.shape}")
+
+# Создаем DataFrame с правильными колонками - используем фактическое число колонок
+actual_cols = confounder_vars[:X_imputed.shape[1]]
+X_imputed_df = pd.DataFrame(X_imputed, columns=actual_cols, index=cohort_pd.index)
+cohort_pd[actual_cols] = X_imputed_df
+
+n_missing_after = cohort_pd[actual_cols].isnull().sum().sum()
+print(f"Пропусков после импутации: {n_missing_after}")
 
 n_missing_after = cohort_pd[confounder_vars].isnull().sum().sum()
 print(f"Пропусков после импутации: {n_missing_after}")
@@ -544,6 +579,12 @@ import json
 with open(OUTPUT_DIR / "cohort_counts.json", "w") as f:
     json.dump(cohort_counts, f, indent=2)
 print(f"cohort_counts сохранен: {OUTPUT_DIR / 'cohort_counts.json'}")
+
+# Save cohort audit
+import pandas as pd
+audit_df = pd.DataFrame(cohort_audit)
+audit_df.to_csv(OUTPUT_DIR / "cohort_audit.csv", index=False)
+print(f"cohort_audit сохранен: {OUTPUT_DIR / 'cohort_audit.csv'}")
 
 print("\n" + "="*70)
 print("COHORT COUNTS - полная цепочка")

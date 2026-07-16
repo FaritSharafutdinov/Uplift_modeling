@@ -1,0 +1,30 @@
+# Causal Inference Pipeline Configuration
+
+# Paths
+MIMIC_DIR: "/Users/faritsharafutdinov/untitled folder/mimic-iv-3.1/mimiciv_as_parquet"
+OUTPUT_DIR: "/Users/faritsharafutdinov/untitled folder/notebook_new"
+
+# Random seeds
+random_state: 42
+numpy_seed: 42
+pandas_seed: 42
+
+# Bootstrap
+n_bootstrap_ipw: 500
+n_bootstrap_matching: 500
+n_bootstrap_aipw: 100
+
+# Propensity model
+propensity_threshold_lower: 0.1
+propensity_threshold_upper: 0.9
+propensity_min_auc: 0.70
+
+# Matching
+matching_caliper: 0.2  # 0.2 * std(propensity)
+matching_ratio: 1  # 1:1 matching
+
+# Cohort
+los_threshold_hours: 24
+age_threshold: 18
+treatment_window_hours: 24
+outcome_window_days: 28
