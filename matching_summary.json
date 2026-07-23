@@ -1,0 +1,8 @@
+{
+  "n_treated_matched": 2192,
+  "n_unique_controls": 1376,
+  "n_repeated_controls": 474,
+  "n_treated_unmatched": 1,
+  "caliper_used": 0.031380040462340456,
+  "replacement_mode": true
+}

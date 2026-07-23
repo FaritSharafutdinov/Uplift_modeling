@@ -3,12 +3,12 @@
   "adults_age_ge_18": 94458,
   "los_ge_24h": 74829,
   "first_stay": 54551,
-  "crystalloids_in_24h": 43354,
-  "with_time_zero": 43354,
-  "with_demographics": 43354,
-  "sepsis_proxy": 27977,
-  "exclude_late_albumin": 4936,
-  "with_treatment": 23041,
-  "known_outcome": 23041,
-  "final_cohort": 23041
+  "crystalloids_in_24h": 41650,
+  "with_time_zero": 41650,
+  "with_demographics": 41650,
+  "sepsis_proxy": 11974,
+  "exclude_late_albumin": 1918,
+  "with_treatment": 10056,
+  "known_outcome": 10056,
+  "final_cohort": 10056
 }
